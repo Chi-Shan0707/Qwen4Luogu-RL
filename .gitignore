@@ -173,3 +173,5 @@ output/luoguqwencoder-lora/checkpoint-*/adapter_model.safetensors
 output/luoguqwencoder-lora/*.safetensors
 
 *.arrow
+*.json
+*.jsonl
