@@ -59,10 +59,6 @@ model = AutoModelForCausalLM.from_pretrained(
 model.config.use_cache = False
 
 
-# ========== 加载数据集 ==========
-# dataset = load_dataset("Misaka114514/luogu_dpo")
-dataset = load_from_disk("./local_luogu_dataset")
-print("已完成数据集加载")
 
 # ========== 定义 TinyLoRA 层 ==========
 
@@ -204,66 +200,109 @@ import re
 import subprocess
 import tempfile
 
-def code_reward_func(completions, solution, **kwargs):
+import subprocess
+import tempfile
+import re
+import os
+
+def compile_and_run(code, test_cases):
     """
-    completions: list[str], 模型生成的回复列表
-    solution: list[str], 数据集里的参考答案（或者测试用例的输入/输出）
-    注意：这里的数据集格式需要你根据实际情况调整。假设 dataset 里有 'input' 和 'output' 字段。
+    编译并运行代码，返回通过率 (0.0 ~ 1.0)
+    """
+    code = re.sub(r'freopen\s*\(.*?\);', '', code, flags=re.IGNORECASE)
+    # 1. 创建临时目录 (用完即删，防止垃圾文件堆积)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        src_file = os.path.join(temp_dir, "solution.cpp")
+        exe_file = os.path.join(temp_dir, "solution")
+        
+        # 2. 写入 C++ 代码
+        with open(src_file, 'w', encoding='utf-8') as f:
+            f.write(code)
+            
+        # 3. 编译 (加上 -O2 优化，且不链接多余库)
+        # timeout=5 防止编译器卡死
+        try:
+            compile_result = subprocess.run(
+                ['g++', src_file, '-o', exe_file, '-O2'],
+                capture_output=True, text=True, timeout=5
+            )
+            if compile_result.returncode != 0:
+                return 0.0 # 编译失败
+        except subprocess.TimeoutExpired:
+            return 0.0 # 编译超时
+
+        # 4. 运行测试用例
+        passed_count = 0
+        total_cases = len(test_cases)
+        
+        if total_cases == 0:
+            return 0.0
+
+        for case in test_cases:
+            input_data = case['input']
+            expected_output = case['output'].strip()
+            
+            try:
+                # 关键：使用 input=input_data 模拟 freopen/cin
+                # timeout=2 秒，防止死循环 (非常重要！！！)
+                run_result = subprocess.run(
+                    [exe_file],
+                    input=input_data,
+                    capture_output=True,
+                    text=True,
+                    timeout=2 
+                )
+                
+                # 获取模型输出并去首尾空格
+                actual_output = run_result.stdout.strip()
+                
+                # 简单比对 (也可以根据需要改成浮点数比对等)
+                if actual_output == expected_output:
+                    passed_count += 1
+                    
+            except subprocess.TimeoutExpired:
+                pass # 运行超时算错
+            except Exception:
+                pass # 运行时错误(RE)算错
+
+        return passed_count / total_cases
+
+def code_reward_func(completions, test_cases, **kwargs):
+    """
+    GRPO 要求的 Reward Function 格式
+    completions: list[str], 模型生成的多个回复
+    test_cases: list[list[dict]], 对应的测试用例（注意 GRPO 传进来的是 batch）
     """
     rewards = []
     
-    # 假设 dataset 的结构是 {'problem': ..., 'test_cases': [{'in': '...', 'out': '...'}]}
-    # 这里为了简化，我们假设 solution 就是预期输出，completions 是代码
-    
-    for completion, sol in zip(completions, solution):
-        # 1. 提取代码块 (```cpp ... ```)
-        code_match = re.search(r"```(?:cpp|c\+\+)?\n(.*?)```", completion, re.DOTALL)
-        if not code_match:
-            rewards.append(0.0) # 没写代码，0分
-            continue
-            
-        code = code_match.group(1)
+    # 遍历每一条生成的回复
+    for completion, cases in zip(completions, test_cases):
+        # 1. 提取代码块
+        # 匹配 ```cpp ... ``` 或 ``` ... ```
+        match = re.search(r"```(?:cpp|c\+\+)?\n(.*?)```", completion, re.DOTALL)
         
-        # 2. 编译与运行 (沙箱环境模拟)
-        # 警告：在生产环境中请使用 docker！本地运行有风险。
-        try:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                src_path = f"{temp_dir}/main.cpp"
-                exe_path = f"{temp_dir}/main"
-                
-                with open(src_path, "w") as f:
-                    f.write(code)
-                
-                # 编译
-                compile_proc = subprocess.run(
-                    ["g++", src_path, "-o", exe_path, "-O2"],
-                    capture_output=True, text=True, timeout=5
-                )
-                if compile_proc.returncode != 0:
-                    rewards.append(0.0) # 编译失败
-                    continue
-                
-                # 运行测试 (假设 sol 是 {'input': '1 2', 'output': '3'})
-                # 这里你需要解析 dataset 里的测试用例
-                # 伪代码：
-                # run_proc = subprocess.run(
-                #     [exe_path], input=sol['input'], capture_output=True, text=True, timeout=2
-                # )
-                # if run_proc.stdout.strip() == sol['output'].strip():
-                #     rewards.append(1.0)
-                # else:
-                #     rewards.append(0.0)
-                
-                rewards.append(0.1) # 暂时给个辛苦分，让你跑通流程
+        if not match:
+            # 如果没提取到，尝试找一下是否有裸代码（包含 #include）
+            if "#include" in completion:
+                code = completion
+            else:
+                rewards.append(0.0) # 格式完全不对
+                continue
+        else:
+            code = match.group(1)
 
-        except Exception as e:
-            print(f"评测异常: {e}")
-            rewards.append(0.0)
-            
+        # 2. 评测
+        score = compile_and_run(code, cases)
+        rewards.append(score)
+        
     return rewards
+
+# ========== 加载数据集 ==========
+
 
 # 当你使用 load_dataset("json", data_files="....jsonl") 时，
 # Hugging Face 会默认把你提供的这个文件归类为 train 分区（这是它的默认行为）。
+
 # 注意：data_files 指向你 convert_dataset.py 生成的具体文件路径
 # split="train" 很重要！因为 load_dataset 默认返回 DatasetDict，
 # 而 Trainer 需要的是 Dataset 对象，指定 split="train" 直接拿到数据。

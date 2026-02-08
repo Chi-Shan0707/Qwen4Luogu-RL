@@ -11,6 +11,8 @@ OUTPUT_FILE = "./local_luogu_rl/luogu_rl_data.jsonl"
 def contains_chinese(text):
     """检查文本是否包含中文字符"""
     return bool(re.search(r'[\u4e00-\u9fa5]', text))
+
+
 def extract_samples(description):
     """
     鲁棒性增强版 + 数据清洗：
