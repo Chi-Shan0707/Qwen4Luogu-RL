@@ -7,12 +7,10 @@ from transformers import (
     AutoModelForCausalLM,
     BitsAndBytesConfig,
 )
-from peft import LoraConfig, get_peft_model
+from peft import prepare_model_for_kbit_training
 from trl import GRPOTrainer, GRPOConfig
 from modelscope.hub.snapshot_download import snapshot_download
-import optimum
 import bitsandbytes as bnb
-from peft import prepare_model_for_kbit_training
 
 
 # ========== 模型配置 ==========
@@ -69,16 +67,28 @@ model = prepare_model_for_kbit_training(model)
 device = model.model.layers[0].self_attn.q_proj.weight.device
 print(f"模型主设备: {device}")
 
-# 直接在 GPU 上创建 global_v，并设为 bfloat16
-global_v = nn.Parameter(torch.zeros(16, device=device, dtype=torch.bfloat16))
-global_v.requires_grad = True
+# 【修复错误1】创建一个 wrapper module 来正确注册 global_v
+class TinyLoRAGlobalParams(nn.Module):
+    """专门用于注册全局共享向量的容器"""
+    def __init__(self, u_dim=16, device='cpu', dtype=torch.bfloat16):
+        super().__init__()
+        # 这样注册才会被 model.named_parameters() 识别
+        self.global_v = nn.Parameter(torch.zeros(u_dim, device=device, dtype=dtype))
+    
+    def forward(self):
+        # 容器模块不需要实际的前向逻辑
+        return self.global_v
+
+# 创建全局参数容器
+global_params = TinyLoRAGlobalParams(u_dim=16, device=device, dtype=torch.bfloat16)
 
 
 class TinyLoRALinear(nn.Module):
-    def __init__(self, original_layer, rank = 2, u = 16, shared_v =None):
+    def __init__(self, original_layer, rank = 2, u = 16, global_params_ref=None):
     # R= v_1 P_1 + v_2 P_2 + ... + v_u P_u
     # v都是scalar
     # P都是rank x rank的矩阵
+    # global_params_ref: 指向包含 global_v 的容器模块
 
         super().__init__()
         # 必先继承父类的初始化函数，才能使用 nn.Module 的功能（例如注册参数和缓冲区）。
@@ -97,13 +107,20 @@ class TinyLoRALinear(nn.Module):
 
 
         self.base_layer = original_layer
+        
+        # 【关键修复】保存对 global_params 容器的引用，而不是直接持有参数
+        # 这样 v 只被 model.tiny_lora_params 持有一次，避免重复注册问题
+        if global_params_ref is None:
+            raise RuntimeError("必须传入 global_params_ref！")
+        self.global_params_ref = global_params_ref
 
         W = original_layer.weight.data.float()
         if hasattr(original_layer.weight, "quant_state"):
-            # 4-bit 情况
+            # 【修复错误2】4-bit 情况：显式传入 quant_type
             W_real = bnb.functional.dequantize_4bit(
                 original_layer.weight.data, 
-                original_layer.weight.quant_state
+                original_layer.weight.quant_state,
+                quant_type="nf4"  # 与 BitsAndBytesConfig 中的配置一致
             )
         else:
             # 非量化情况
@@ -135,36 +152,26 @@ class TinyLoRALinear(nn.Module):
         
         # 固定随机矩阵 P  (For TinyLoRA)
         self.register_buffer('P', torch.randn(u, rank, rank, device=original_device, dtype=target_dtype))
-        
-        # 唯一的可训练参数 v (如果传入 shared_v 则实现参数共享)
-
-        if shared_v is not None:
-            # 严查设备是否一致
-            if shared_v.device != original_device:
-                raise RuntimeError(
-                    f"设备不匹配！shared_v 在 {shared_v.device}, "
-                    f"但当前层在 {original_device}。\n"
-                    "在单卡训练中，请确保 global_v 和模型都在同一张卡上。"
-                )
-            
-            # 直接引用！不要 clone，不要 nn.Parameter
-            self.v = shared_v 
-        else:
-            self.v = nn.Parameter(torch.zeros(u, device=original_device, dtype=target_dtype))
 
     def forward(self, x):
-        # 计算 TinyLoRA 的增量矩阵 R
-        R = torch.einsum('u, urr -> rr', self.v, self.P)
+        # 【关键修复】动态从容器中获取 global_v，而不是作为自己的属性
+        # 这样确保 v 只被 model.tiny_lora_params 注册一次
+        v = self.global_params_ref.global_v
+        
+        # 计算 TinyLoRA 的增量矩阵 R = sum_i(v_i * P_i)
+        # 注意：不能用 'u, urr -> rr'，因为 einsum 输出中同一下标不能重复
+        # 必须用不同字母区分两个 rank 维度
+        R = torch.einsum('u, uij -> ij', v, self.P)
         # 重组增量权重
         delta_W = self.U @ self.S @ R @ self.Vh
         # 前向传播：x * (W + delta_W)^T
         return self.base_layer(x) + x @ delta_W.t()
 
 
-def apply_tiny_lora(model, shared_v):
+def apply_tiny_lora(model, global_params_ref):
     """
     遍历模型，将所有目标 Linear 层替换为 TinyLoRALinear，
-    并强制使用同一个 shared_v，实现论文中的 Tiling (全参数共享)。
+    并传入对 global_params 容器的引用，实现论文中的 Tiling (全参数共享)。
     """
     # Qwen/Llama 的目标模块名称通常包含这些
     target_suffixes = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
@@ -175,10 +182,9 @@ def apply_tiny_lora(model, shared_v):
     # 递归函数：遍历子模块
     for name, child in model.named_children():
         # 如果是目标 Linear 层
-        if isinstance(child, nn.Linear) and any(name.endswith(s) for s in target_suffixes):
-            # 1. 创建 TinyLoRA 层，传入 global_v
-            # 注意：original_layer=child，shared_v=shared_v
-            new_layer = TinyLoRALinear(child, rank=2, u=16, shared_v=shared_v)
+        if isinstance(child, (nn.Linear, bnb.nn.Linear4bit)) and any(name.endswith(s) for s in target_suffixes):
+            # 1. 创建 TinyLoRA 层，传入 global_params 容器的引用
+            new_layer = TinyLoRALinear(child, rank=2, u=16, global_params_ref=global_params_ref)
             
             # 2. 替换掉原模块 (Monkey Patch)
             setattr(model, name, new_layer)
@@ -187,34 +193,45 @@ def apply_tiny_lora(model, shared_v):
             
         else:
             # 继续递归遍历子模块 (例如 model.layers.0.self_attn...)
-            apply_tiny_lora(child, shared_v)
+            replaced_count += apply_tiny_lora(child, global_params_ref)
             
     return replaced_count
 
 # ========== 执行替换 ==========
 print("正在应用 TinyLoRA Tiling (参数共享)...")
-# global_v 已经在你之前的代码中定义了
-total_replaced = apply_tiny_lora(model, global_v)
+
+# 【关键修复】先将 global_params 注册为模型的子模块
+# 这样在层替换时，TinyLoRALinear 就能通过引用访问到已注册的 global_v
+model.tiny_lora_params = global_params
+print(f"✅ 已将 global_params 注册到模型")
+
+# 然后再进行层替换，传入 global_params 容器本身
+total_replaced = apply_tiny_lora(model, global_params)
 print(f"替换完成！共替换了 {total_replaced} 个模块。")
 
 # ========== 关键步骤：冻结除 v 以外的所有参数 ==========
 print("正在冻结模型参数...")
 
-for name, param in model.named_parameters():
-    # 只有 global_v 需要梯度，其他全部冻结
-    # 注意：因为我们是把 shared_v 传进去的，id(param) == id(global_v)
-    if param is global_v:
-        param.requires_grad = True
-    else:
-        param.requires_grad = False
+# 【更优雅的方案】直接通过对象引用操作，不依赖字符串匹配
+# 1. 第一步：全局冻结所有参数
+model.requires_grad_(False)
+
+# 2. 第二步：精准解冻 global_v
+# 直接通过对象引用操作，绝对稳健
+global_params.global_v.requires_grad = True
+print(f"✅ 可训练参数: global_v, shape={global_params.global_v.shape}")
+
+# 验证可训练参数
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+all_params = sum(p.numel() for p in model.parameters())
+print(f"\n总参数量: {all_params:,}")
+print(f"可训练参数量: {trainable_params}")
+if trainable_params != 16:
+    raise RuntimeError(f"警告：可训练参数数量为 {trainable_params}，预期为 16！")
 
 import re
 import subprocess
 import tempfile
-
-import subprocess
-import tempfile
-import re
 import os
 
 def compile_and_run(code, test_cases):
@@ -308,6 +325,21 @@ def code_reward_func(completions, test_cases, **kwargs):
         rewards.append(score)
         
     return rewards
+    
+
+# 【修复错误4 - 最终方案】绕过 Trainer 对纯量化模型的检查
+# Trainer 的检查逻辑 (transformers/trainer.py):
+#   _is_quantized_and_base_model = model.is_quantized AND NOT model._hf_peft_config_loaded
+#   if _is_quantized_and_base_model and not isinstance(model, PeftModel): raise ValueError
+#
+# 我们的 TinyLoRA 是合法的 adapter（只训练 16 个参数），但不是标准 PeftModel。
+# 设置 _hf_peft_config_loaded = True 让第一道检查直接为 False，不会走到 isinstance 判断。
+# 这不影响实际计算——权重已经在内存中量化，TinyLoRA 层正确处理了反量化。
+model._hf_peft_config_loaded = True
+
+print("✅ 已设置 _hf_peft_config_loaded=True，绕过 Trainer 的量化模型检查")
+
+
 
 # ========== 加载数据集 ==========
 
@@ -357,6 +389,6 @@ trainer.train()
 
 # 保存 LoRA (只保存那个 v 向量)
 # 注意：peft 的 save_pretrained 可能不认你的自定义层
-# 你可能需要手动保存 global_v
-torch.save(global_v, f"{OUTPUT_DIR}/tiny_lora_v.pt")
+# 手动保存 global_v
+torch.save(global_params.global_v, f"{OUTPUT_DIR}/tiny_lora_v.pt")
 print("训练完成，参数已保存！")
