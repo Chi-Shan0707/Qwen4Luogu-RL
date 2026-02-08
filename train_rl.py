@@ -339,6 +339,21 @@ model._hf_peft_config_loaded = True
 
 print("✅ 已设置 _hf_peft_config_loaded=True，绕过 Trainer 的量化模型检查")
 
+def apply_chat_template(example):
+    # 构建 Qwen 的标准对话格式
+    messages = [
+        {"role": "system", "content": "你是一个智能编程助手。请直接输出满足题目要求的C++代码。"},
+        {"role": "user", "content": example['prompt']}
+    ]
+    # 使用 tokenizer 自动应用模版（不生成，只转字符串）
+    # 结果类似：<|im_start|>system...<|im_end|><|im_start|>user...<|im_end|><|im_start|>assistant
+    example['prompt'] = tokenizer.apply_chat_template(
+        messages, 
+        tokenize=False, 
+        add_generation_prompt=True
+    )
+    return example
+
 
 
 # ========== 加载数据集 ==========
@@ -356,7 +371,8 @@ rl_dataset = load_dataset(
     # 确认这里的路径和你 convert_dataset.py 里的 OUTPUT_FILE 一致
     split="train"
 )
-
+# 应用模版
+rl_dataset = rl_dataset.map(apply_chat_template)
 # 2. (可选) 打印一条数据验证一下
 print(f"数据加载成功！样本数量: {len(rl_dataset)}")
 print(f"样例数据: {rl_dataset[0]}")
@@ -369,7 +385,7 @@ training_args = GRPOConfig(
     gradient_accumulation_steps=8, # 累积梯度来模拟大 Batch
     learning_rate=1e-5,            # RL 学习率通常要小
     num_generations=4,             # Group Size (G): 每次采样 4 个答案
-    max_completion_length=512,     # 生成的最大长度
+    max_completion_length=1024,     # 生成的最大长度
     logging_steps=1,
     bf16=True,                     # 开启 BF16 加速
 )
