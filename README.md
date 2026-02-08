@@ -1,397 +1,579 @@
-# LuoguQwen — LoRA 微调示例
+# LuoguQwen-RL — TinyLoRA 代码强化学习实验
 
-本仓库提供基于 Qwen 指令模型的 LoRA 微调示例和相关工具，包含训练脚本、评估脚本与示例数据。下文为项目说明、快速使用方法、基模型获取、推理方法、训练参数、数据来源及许可说明。
+本仓库是原「LuoguQwen LoRA 微调」项目的进化版：
 
+> 什么，你问我为什么要挑选 Qwen2.5-1.5B-Instruct 进行微调？<br>
+> —— 那当然是因为它参数量小啦。<br>
+>
+> 什么，你继续问我为什么不挑选 Qwen2.5-Coder-1.5B-Instruct 进行微调？<br>
+> ~~我如果在这阿里进行过代码训练上的模型进行微调，哪能看得出我微调的效果？~~<br>
+> ~~好吧，其实是我问千问有什么参数量小的模型，它推荐了这个，然后我一时间忘记继续去搜集信息，直接开搞惹，结果训练到一半才在 ModelScope 上刷到 Qwen2.5-Coder-1.5B-Instruct。PWP~~<br>
+> ~~第一遍实在太差了，反正还要再训练一遍，还是弄 Qwen2.5-Coder-1.5B-Instruct 吧~~<br>
+> 这个也太差劲了，上 7B 吧 PwP<br>
+> *不对，为什么疯狂报 mismatch 啊啊？从 1.5B→7B 我啥都没改啊？*<br>
+> *疯狂 debug，疯狂研究格式……*<br>
+> 算了，格式弄成所谓的标准型吧。<br>
+> 7B 根本跑不动啊，只能 3B。<br>
+> ~~啊训练完了，参数根本上传不动啊？啊，huggingface 也上传不动啊 PwP~~<br>
 
-> 什么，你问我为什么要挑选Qwen2.5-1.5B-Instruct进行微调？<br>
-- 那当然是因为它参数量小啦。<br>
+于是，本项目干脆把「卷大模型」这条路彻底放弃，走上了另一条更离谱的路：
 
-> 什么，你继续问我为什么不挑选Qwen2.5-Coder-1.5B-Instruct进行微调？<br>
-- ~~我如果在这阿里进行过代码训练上的模型进行微调，哪能看得出我微调的效果？~~<br>
-~~好吧，其实是我问千问有什么参数量小的模型，它推荐了这个，然后我一时间忘记继续去搜集信息，直接开搞惹，结果训练到一半才在ModelScope上刷到Qwen2.5-Coder-1.5B-Instruct。PWP~~<br>
- ~~第一遍实在太差了，反正还要再训练一遍，还是弄Qwen2.5-Coder-1.5B-Instruct吧~~
- 这个也太差劲了，上7B吧PwP<br>
- *不对，为什么疯狂报mismatch啊啊？从1.5B->7B我啥都没改啊？<br>
- *疯狂debug,疯狂研究格式*<br>
- 算了，格式弄成所谓的标准型吧<br>
- 7B根本跑不动啊，只能3B<br>
- ~~啊训练完了，参数根本上传不动啊？啊，huggingface也上传不动啊PwP~~
+- 基座：Qwen2.5-Coder-3B-Instruct，4bit 量化以挤爆最后一点显存；
+- 训练：不用 SFT，用 RL（GRPO）；
+- 参数：全模型只保留 **16 个可训练标量参数**；
+- 任务：用「编译+运行 C++ 代码」的方式在洛谷题目上搞代码强化学习。
 
-> 友情提示<br>
-> UserWarning: Model has `tie_word_embeddings=True` and a tied layer is part of the adapter, but `ensure_weight_tying` is not set to True. This can lead to complications, for example when merging the adapter or converting your model to formats other than safetensors. Check the discussion here: https://github.com/huggingface/peft/issues/2777<br>
-> *适配器和权重绑定的冲突，本质是PEFT 的 “独立层默认认知”与模型的 “权重绑定实际情况”的偏差，仅在合并适配器权重时暴露，ensure_weight_tying=True就是用来修正这个偏差的开关。而你现在看到的警告，就是 PEFT 在提醒你：“我现在按默认认知处理适配器，合并时可能会出偏差，记得打开纠偏开关～”。*
+如果你也对「极限参数压缩 + 代码 RL」感兴趣，这个仓库就是给你的。
+
+---
 
 ## 目录
 
 - 项目概述
+- 论文复现
+- 核心特点
 - 快速开始
-- 下载基模型
-- 使用 LoRA 权重进行推理
-- 训练（SFT）关键参数
-- 数据集来源
+- 数据准备与格式
+- 训练流程（RL / GRPO）
+- TinyLoRA Tiling 技术细节
+- 奖励函数：编译运行 C++ 代码
+- 资源消耗与注意事项
 - 开源与许可证
-- 联系方式与引用
-- 依赖安装
+- 联系方式
+- English
+- 论文引用
 
 ---
 
 ## 项目概述
 
-本仓库包含用于对 Qwen 指令模型在中文竞赛题数据上进行 LoRA 微调的示例：
+LuoguQwen-RL 的目标是：
 
-- `train_sft.py`：基于 TRL 的 `SFTTrainer` 进行 LoRA 微调。
-- `evaluate_model.py`：使用合并后的 LoRA 权重进行离线推理的示例。
-- `download_dataset.py`：下载dataset
-- `convert_dataset.py`：将原本的数据集格式转化为`SFTTrainer`可接受的`prompt`+`completion`格式
-- `check_format.py`：检查转化后的格式
+> 在显存受限（3B 模型 + 4bit 量化）且参数极致压缩（仅 16 个参数）的前提下，
+> 通过强化学习让 Qwen2.5-Coder 在洛谷竞赛题上学会「能过样例」的 C++ 代码生成。
+
+本仓库并不是凭空设计的，而是一个**TinyLoRA 论文方向的复现与变体实验**：
+
+- `theory/README.md` 中给出了 TinyLoRA / GRPO 的理论与工程细节梳理；
+- 本项目在此基础上，将 TinyLoRA 的思想从数学推理（如 GSM8K）迁移到**代码生成 + 编译执行奖励**场景；
+- 论文中经典设置是 7B 模型 + 13 个参数，本仓库使用 3B Coder 模型 + 16 个参数，保持「极低秩 + 全局共享」这一精神内核。
+
+核心脚本：
+
+- `train_rl.py`：
+  - 加载 4bit 量化的 `Qwen2.5-Coder-3B-Instruct`；
+  - 将指定 Linear 层替换为自定义 `TinyLoRALinear`，并通过共享向量 `global_v` 实现 TinyLoRA Tiling；
+  - 使用 TRL 的 `GRPOTrainer` 进行代码强化学习；
+  - 奖励来自本地 `g++` 编译 + 测试用例执行通过率。
+- `convert_dataset.py`：
+  - 从本地洛谷题目数据（Markdown 风格）中用正则抽取 `prompt`（题面）与 `test_cases`（输入输出样例）；
+  - 过滤掉包含中文的样例，转存为 JSONL，供 RL 训练使用。
+- `check_TinyLoRA.py`：
+  - 与 `train_rl.py` 中相同的 TinyLoRA 注入流程；
+  - 统计模型总参数量与可训练参数量，验证「只训练 16 个参数」是否真的生效。
+
+目录结构（节选）：
+
+- `train_rl.py`：主训练脚本（TinyLoRA + GRPO）。
+- `check_TinyLoRA.py`：TinyLoRA 参数检查脚本。
+- `convert_dataset.py`：将本地洛谷 DPO 数据转为 RL JSONL 格式。
+- `local_luogu_dpo/`：从原 DPO 数据集转存的本地数据（`load_from_disk` 产物）。
+- `local_luogu_rl/luogu_rl_data.jsonl`：RL 训练数据（`convert_dataset.py` 输出）。
+- `models/Qwen2.5-Coder-3B-Instruct/`：基座模型目录（可通过 ModelScope 自动下载）。
+- `output/`：RL 训练输出目录（包括最终的 `tiny_lora_v.pt`）。
+
+---
+## 论文复现
+
+[cite_start]本项目是论文 **"Learning to Reason in 13 Parameters" (Morris et al., 2026)** 的非官方复现与工程适配 [cite: 2]。
+
+### 1. 核心理论：TinyLoRA
+原论文提出了一种极端的参数高效微调方法 **TinyLoRA**，旨在打破 LoRA 的秩（Rank）限制。
+- [cite_start]**痛点**：传统 LoRA 即使 Rank=1，其参数量仍与模型宽度 $d$ 成正比（$O(d \times r)$），对于 7B 模型约为数百万参数 [cite: 17, 158]。
+- [cite_start]**创新**：TinyLoRA 利用 SVD 冻结原权重的特征方向 ($U, V$)，仅学习一个极小的向量 $v$。通过在不同层之间共享这个向量（**Tiling**），可将全网可训练参数压缩至个位数 [cite: 7, 175, 181]。
+- **公式**：
+  $$W' = W + U \Sigma (\sum_{i=1}^{u} v_i P_i) V^\top$$
+  [cite_start]其中 $U, \Sigma, V$ 来自原权重的 SVD 分解（冻结），$P$ 是固定随机投影，$v$ 是唯一的可训练参数 [cite: 173, 174]。
+
+### 2. 为什么必须是 RL？
+[cite_start]论文的核心发现是：**在如此极端的参数限制下（<100 参数），SFT（监督微调）几乎完全失效，只有 RL（强化学习）能奏效** [cite: 10, 65]。
+- [cite_start]**SFT 的局限**：SFT 强迫模型记忆参考答案的格式和风格（"Noise"），这需要较大的容量 [cite: 147, 148]。
+- [cite_start]**RL 的优势**：RL 仅关注最终结果的对错（"Signal"），允许模型忽略无关细节。TinyLoRA 正是利用这一点，在仅有 13 个参数的情况下，通过 GRPO 算法在 GSM8K 上达到了 91% 的准确率 [cite: 64, 149]。
+
+### 3. 本项目的“魔改”适配
+我们遵循论文的精神内核，但针对**代码生成任务**和**消费级显卡**进行了适配：
+
+| 特性 | 原论文设置 (Paper) | 本项目适配 (Ours) |
+| :--- | :--- | :--- |
+| **任务领域** | [cite_start]数学推理 (GSM8K, MATH) [cite: 8] | **代码竞赛 (Luogu OJ)** |
+| **基座模型** | [cite_start]Qwen2.5-7B / Llama-3 [cite: 64] | **Qwen2.5-Coder-3B-Instruct** |
+| **参数量** | 13 参数 ($u=13$) | **16 参数 ($u=16$)** |
+| **精度处理** | [cite_start]BF16 / FP32 [cite: 8] | **4-bit 量化 (NF4) + 动态反量化 SVD** |
+| **奖励机制** | 答案匹配 (Exact Match) | **g++ 编译 + 测试用例运行 (RLVR)** |
+| **显存优化** | 需高显存 (A100/H100) | **适配单卡消费级 GPU (16GB+)** |
+
+> **关键工程挑战**：原论文未涉及 4-bit 量化模型。本项目额外实现了在初始化阶段对 4-bit 权重进行 `dequantize` 解包，在 CPU 上完成 FP32 精度的 SVD 分解，再转回 BF16 注册为 Buffer 的流程，从而在低显存环境下实现了 TinyLoRA 初始化。
+
+## 核心特点
+
+- **极致参数压缩**：
+  - 整个模型的可训练参数只有一个向量 `global_v ∈ R^{16}`；
+  - 全网所有被替换的 Linear 层都共享这 16 个标量；
+  - `check_TinyLoRA.py` 会输出总参数量 / 可训练参数量 / 压缩率。
+
+- **TinyLoRA Tiling**：
+  - 对原始 Linear 权重（包括 4bit 量化权重）做 SVD 分解，得到固定的骨架 `U, S, Vh`；
+  - 再通过随机矩阵簇 `P ∈ R^{u×r×r}` 与共享向量 `v ∈ R^u` 重构一个低秩增量；
+  - 只训练 `v`，实现论文中的 Tiling / 全参数共享。
+
+- **真实代码环境奖励**：
+  - 把模型生成的 C++ 代码写入临时文件；
+  - 使用系统 `g++` 编译；
+  - 为每道题运行多个输入输出样例，按通过率返回 `0.0 ~ 1.0` 之间的 reward；
+  - 代码不通过编译 / 超时 / 运行错误 -> reward 直接趋近于 0。
+
+- **显存友好**：
+  - 基座为 3B Coder 模型，结合 bitsandbytes 4bit 量化 + BF16 计算；
+  - 在单卡有限显存环境下也能跑完整的 RL loop（当然，会比较慢）。
 
 ---
 
 ## 快速开始
 
-**注意：本项目代码基于最新版本的库编写，请确保安装最新版本的依赖包以避免兼容性问题。**
+### 1. 环境准备
 
-1. 创建虚拟环境并安装依赖：
+建议使用 Linux + Python 3.10 及以上版本，并确保已安装 `g++` 编译器。
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
 
-# 或使用 Conda（推荐用于环境隔离）：
-conda create -n luoguqwen python=3.10 -y
-conda activate luoguqwen
 pip install -r requirements.txt
 ```
 
-2. 下载基模型（参见下文），设置 `LOCAL_MODEL_DIR` 与 `OUTPUT_DIR`，然后运行训练：
+> 提示：`requirements.txt` 中已包含 `torch`、`transformers`、`datasets`、`trl`、`peft`、`bitsandbytes`、`modelscope` 等依赖。
 
-```bash
-# 根据环境调整 accelerate 命令
-accelerate launch train_sft.py
-```
+### 2. 下载基座模型
 
-3. 训练完成后，运行推理示例：
+`train_rl.py` 会在本地不存在模型时，自动通过 ModelScope 下载：
 
-```bash
-python evaluate_model.py
-```
+- 模型 ID：`qwen/Qwen2.5-Coder-3B-Instruct`
+- 默认本地路径：`./models/Qwen2.5-Coder-3B-Instruct`
 
----
-
-## 下载基模型
-
-推荐基模型：`qwen/Qwen2.5-1.5B-Instruct`（ModelScope）。获取方式示例：
-
-- 从 ModelScope 下载（`train_sft.py` 使用 `snapshot_download`）：
+你也可以显式调用：
 
 ```python
 from modelscope.hub.snapshot_download import snapshot_download
-snapshot_download(repo_id="qwen/Qwen2.5-Coder-1.5B-Instruct", local_dir="./models/Qwen2.5-Coder-1.5B-Instruct")
+
+snapshot_download(
+    repo_id="qwen/Qwen2.5-Coder-3B-Instruct",
+    local_dir="./models/Qwen2.5-Coder-3B-Instruct",
+)
 ```
 
-- 或通过 Hugging Face（如可用且许可允许）：
+### 3. 准备洛谷数据（DPO → RL）
+
+假设你已经有一个从 Hugging Face / ModelScope 下载的洛谷 DPO 数据集，并通过 `datasets` 的 `load_from_disk` 保存到了本地 `./local_luogu_dpo/` 目录（目录下含 `state.json` 等文件）。
+
+运行：
+
+```bash
+python convert_dataset.py
+```
+
+`convert_dataset.py` 会：
+
+- 从 `./local_luogu_dpo` 中读取 `train` split；
+- 提取 `item["conversations"][0]["value"]` 作为题目描述；
+- 用正则在题面中匹配「样例输入 / 输出」代码块；
+- 丢弃包含中文字符的样例（只保留纯数字 / 英文 / 符号的样例）；
+- 将结果写入 `./local_luogu_rl/luogu_rl_data.jsonl`；
+- 同时把提取失败的题面写入 `./local_luogu_rl/failed_extraction.jsonl` 以便人工排查。
+
+### 4. 检查 TinyLoRA 注入是否正确（可选）
+
+在真正训练前，可以先跑一遍：
+
+```bash
+python check_TinyLoRA.py
+```
+
+你会看到：
+
+- 被替换为 `TinyLoRALinear` 的模块数量（比如若干 `q_proj / k_proj / v_proj / o_proj / gate_proj / up_proj / down_proj`）；
+- 模型总参数量；
+- 当前可训练参数量是否为 16；
+- 参数压缩率（通常是一个非常夸张的小数）。
+
+如果最终输出中提示：
+
+> `>>> 成功！当前仅训练 16 个参数 (TinyLoRA Tiling 生效) <<<`
+
+说明 TinyLoRA 注入与参数冻结逻辑是正常的。
+
+### 5. 启动 RL 训练
+
+```bash
+python train_rl.py
+```
+
+`train_rl.py` 将会：
+
+1. 确保基座模型已准备好（必要时自动下载）；
+2. 以 4bit 量化方式加载 `Qwen2.5-Coder-3B-Instruct`；
+3. 注入 TinyLoRA Tiling（全局共享 `global_v`）；
+4. 从 `./local_luogu_rl/luogu_rl_data.jsonl` 读取 RL 数据；
+5. 使用 `GRPOTrainer` 进行强化学习；
+6. 训练完成后，将 `global_v` 保存为 `output/tiny_lora_v.pt`。
+
+如果你想自定义输出目录，可以修改 `train_rl.py` 顶部的：
 
 ```python
-from transformers import AutoModelForCausalLM, AutoTokenizer
-tokenizer = AutoTokenizer.from_pretrained("qwen/Qwen2.5-Coder-1.5B-Instruct")
-model = AutoModelForCausalLM.from_pretrained("qwen/Qwen2.5-Coder-1.5B-Instruct")
+OUTPUT_DIR = "./output/luoguqwencoder-lora"
 ```
 
-注意：基模型体积较大并含有独立许可条款，请遵守相应使用条款。本仓库不包含完整基模型文件。
-
 ---
 
-## 使用 LoRA 权重进行推理
+## 数据准备与格式
 
-训练完成后，`output/luoguqwen-lora/`（或 `train_sft.py` 中的 `OUTPUT_DIR`）将包含 LoRA 权重与 tokenizer 文件。
+### 上游数据：洛谷题目（DPO 版）
 
-注意：本项目的 LoRA 权重也已经上传到 ModelScope（模型页路径）：
-https://www.modelscope.cn/models/yuhanChi/Qwen4Luogu/tree/master/output/luoguqwencoder-lora 。
-你可以直接从该页面下载所需文件并放到本地的 `output/luoguqwencoder-lora/` 目录，或在加载时使用该目录路径，之后按下述步骤加载和合并权重。
+原始数据形态大致为：
 
-推荐流程：
+- 字段 `conversations`：一个对话列表；
+- 通常 `conversations[0]["value"]` 是题目描述（Markdown 风格）；
+- 题目中包含类似：
 
-1. 加载基模型与 tokenizer，使用 `peft` 加载 LoRA 权重，可选地合并权重以提升推理性能。
-
-```python
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from peft import PeftModel
-
-base = AutoModelForCausalLM.from_pretrained("./models/Qwen2.5-Coder-1.5B-Instruct", device_map="auto", torch_dtype="auto", trust_remote_code=True)
-tokenizer = AutoTokenizer.from_pretrained("./models/Qwen2.5-Coder-1.5B-Instruct", trust_remote_code=True)
-model = PeftModel.from_pretrained(base, "./output/luoguqwencoder-lora")
-model = model.merge_and_unload()
-
-# 使用 model.generate 进行推理
+```markdown
+**输入：**
+```text
+... 样例输入 ...
 ```
 
-2. `evaluate_model.py` 已包含最小推理示例，生成结果并保存至 `evaluation_results/evaluation_results.json`。
+**输出：**
+```text
+... 样例输出 ...
+```
+```
 
-若仅公开 LoRA 权重，请在 README 中说明用户需自行下载基模型并提供路径。
+`convert_dataset.py` 会从这里抽取测试用例。
 
----
+### RL 训练数据：JSONL 格式
 
-## 训练（SFT）关键参数
+`convert_dataset.py` 生成的 `luogu_rl_data.jsonl` 中，每一行是一条 JSON，对应一题：
 
-**注意：本项目使用 TRL 0.27+ 的新特性（如 SFTConfig 和 ChatML 格式），请确保 TRL 版本 >= 0.27.0。**
+```json
+{
+  "prompt": "<完整题目描述，通常是 Markdown 文本>",
+  "test_cases": [
+    {"input": "<样例输入 1>", "output": "<样例输出 1>"},
+    {"input": "<样例输入 2>", "output": "<样例输出 2>"}
+  ]
+}
+```
 
-`train_sft.py` 中使用的示例超参数：
-
-- LoRA：`r=16`，`lora_alpha=32`，`lora_dropout=0.05`，目标模块：`q_proj, k_proj, v_proj, o_proj`。
-- 训练：`num_train_epochs=2`，`per_device_train_batch_size=1`，`gradient_accumulation_steps=16`，`learning_rate=2e-4`。
-- 可选：使用 4-bit (bnb NF4) 量化以节省显存。
-
-上述参数为示例。请根据数据规模与显存调整超参数以获得稳定结果。
-
----
-
-## 数据集来源
-
-示例数据位于 `dataset_example/`，用于演示格式。`train_sft.py` 中使用`load_dataset("Misaka114514/luogu_dpo")` 
-
-在线数据集链接（Hugging Face）：
-
-- https://huggingface.co/datasets/Misaka114514/luogu_dpo
-
-示例加载方法：
+在 `train_rl.py` 中通过：
 
 ```python
 from datasets import load_dataset
-dataset = load_dataset("Misaka114514/luogu_dpo")
+
+rl_dataset = load_dataset(
+    "json",
+    data_files="./local_luogu_rl/luogu_rl_data.jsonl",
+    split="train",
+)
 ```
 
-发布数据时请注意版权与隐私，只有在有权分享时才将数据包含在仓库内；否则提供数据获取或处理脚本并注明来源与许可。
+直接作为 `GRPOTrainer` 的 `train_dataset` 使用。
+
+---
+
+## 训练流程（RL / GRPO）
+
+核心训练逻辑位于 `train_rl.py`：
+
+1. **模型加载与量化**
+   - 使用 `BitsAndBytesConfig`：
+     - `load_in_4bit=True`
+     - `bnb_4bit_quant_type="nf4"`
+     - `bnb_4bit_use_double_quant=True`
+     - `bnb_4bit_compute_dtype=torch.float16`
+   - 通过 `device_map="auto"` 将模型自动切分到可用 GPU。
+
+2. **TinyLoRA 注入与参数冻结**
+   - 创建全局共享向量：
+     - `global_v = nn.Parameter(torch.zeros(16))`
+   - 通过 `apply_tiny_lora(model, global_v)`：
+     - 遍历模型子模块；
+     - 找到名字以 `q_proj / k_proj / v_proj / o_proj / gate_proj / up_proj / down_proj` 结尾的 `nn.Linear`；
+     - 替换为 `TinyLoRALinear`；
+   - 随后：
+     - 仅保留 `global_v` 的 `requires_grad=True`；
+     - 其他所有参数全部 `requires_grad=False`。
+
+3. **GRPO 配置**
+
+`train_rl.py` 中使用的示例超参数：
+
+- `num_train_epochs=1`
+- `per_device_train_batch_size=1`
+- `gradient_accumulation_steps=8`
+- `learning_rate=1e-5`
+- `num_generations=4`（Group Size G，每个样本采样 4 个答案）
+- `max_completion_length=512`
+- `bf16=True`
+
+你可以根据显存与训练时间需求调整上面的参数。
+
+4. **训练循环**
+
+GRPO 的整体流程简要为：
+
+- 对于每个样本 `prompt`：
+  1. 采样多个 `completions`（C++ 代码）；
+  2. 调用 `code_reward_func` 对每个 completion 编译 + 运行，得到 reward；
+  3. 使用 GRPO 算法根据 reward 更新策略（这里就是更新 16 维的 `global_v`）。
+
+---
+
+## TinyLoRA Tiling 技术细节
+
+自定义层 `TinyLoRALinear` 的核心思想：
+
+1. 对原始权重矩阵 `W ∈ R^{out×in}` 做 SVD：
+
+   $$W = U S V^H$$
+
+   - 实现中先将 4bit 权重反量化为 `W_real`，再在 CPU 上做 `torch.linalg.svd`；
+   - 只取前 `rank=2` 个奇异值及对应的列 / 行，得到精简版 `U, S, V^H`；
+   - 这些张量通过 `register_buffer` 注册为 Buffer，不参与训练。
+
+2. 定义全局共享参数：
+
+   - `v ∈ R^u`，其中 `u=16`；
+   - 随机初始化一组固定矩阵簇 `P ∈ R^{u×r×r}`；
+   - 构造：
+
+     $$R = \sum_{i=1}^{u} v_i P_i \in R^{r×r}$$
+
+3. 构造增量权重：
+
+   - $$\Delta W = U S R V^H$$
+   - 实际前向中计算：
+
+     $$y = x W^T + x (\Delta W)^T$$
+
+4. Tiling（跨层共享）
+
+   - 模型中所有目标 `nn.Linear` 层都共享同一个 `v`；
+   - 整个模型只有这一组 16 维参数在更新。
+
+`check_TinyLoRA.py` 会统计并打印可训练参数量，以验证上述逻辑是否被正确应用。
+
+---
+
+## 奖励函数：编译运行 C++ 代码
+
+奖励函数实现位于 `train_rl.py` 中的 `code_reward_func` 与 `compile_and_run`：
+
+1. **从模型输出中提取代码**
+   - 优先匹配形如：
+
+     ```markdown
+     ```cpp
+     // C++ 代码
+     ```
+     ```
+
+   - 若没有显式代码块，则回退为只要包含 `#include` 的裸代码段；
+   - 若仍无法识别，则直接给 0 分。
+
+2. **编译阶段**
+   - 将代码写入临时目录中的 `solution.cpp`；
+   - 通过正则删除代码中的 `freopen(...)` 等文件重定向语句，改用标准输入输出；
+   - 使用：
+
+     ```bash
+     g++ solution.cpp -o solution -O2
+     ```
+
+   - 编译失败 / 超时 -> 本次样本 reward = 0。
+
+3. **运行阶段**
+   - 对每个测试用例：
+     - 将 `case["input"]` 作为 stdin；
+     - 捕获 stdout，与 `case["output"]` 进行字符串级比对（`strip()` 后）；
+   - 运行有超时保护（例如 2 秒），防止死循环卡死训练。
+
+4. **打分规则**
+
+   - 若总共有 `N` 个测试用例，通过了 `k` 个，则 reward：
+
+     $$\text{reward} = \frac{k}{N} \in [0, 1]$$
+
+   - 编译失败 / 全部用例失败：reward=0。
+
+> 这意味着模型不仅要「看起来像 C++」，还要真的能通过样例输入输出，
+> 强化信号来自真实的编译器与运行环境，而非静态打分。
+
+---
+
+## 资源消耗与注意事项
+
+- **显存**：
+  - 3B 模型 + 4bit 量化 + BF16 计算，单卡 16GB 显存可以尝试（但余量不算大）；
+  - RL + 编译运行会显著增加时间消耗，训练速度会比传统 LoRA SFT 慢很多。
+
+- **操作系统**：
+  - 推荐 Linux 环境（当前脚本在 Linux 下开发与测试）；
+  - 需要可用的 `g++`，并且能够在临时目录下创建与执行可执行文件。
+
+- **安全**：
+  - 强烈不建议对不受信任的数据集运行此奖励函数；
+  - 本项目的假设是「数据集来源可信」且仅用于研究环境。
 
 ---
 
 ## 开源与许可证
 
-- 本仓库脚本示例采用 MIT 许可证（参见 `LICENSE`）。
-- 基模型（`qwen/Qwen2.5-1.5B-Instruct`）为第三方提供，请遵守其原始许可证并自行获取基模型，本仓库不承担基模型的分发许可。
-- 推荐公开的仓库内容：
-  - `train_sft.py`、`evaluate_model.py`、`requirements.txt`、`dataset_example/`（若可分享）及 LoRA 权重文件夹 `output/luoguqwen-lora/`。
-  - 不建议在仓库中托管完整基模型 `models/`，体积和许可均不适宜直接托管。
-
-关于将 LoRA 权重上传至 GitHub 的说明：
-
-- LoRA 权重通常为几十 MB 到几百 MB，可直接提交或使用 Git LFS 管理。若使用 Git LFS，请在 README 中注明并确保协作者安装 LFS。
-- 本仓库 `.gitignore` 建议排除基模型目录 `models/` 与大型临时 checkpoint，同时允许 `output/luoguqwen-lora/` 被发布。
+- 本仓库脚本默认采用 MIT 许可证（见 `LICENSE`）。
+- 基座模型 `Qwen2.5-Coder-3B-Instruct` 由第三方（Qwen 团队）提供，请遵守其原始许可证；
+- 本仓库不分发完整基座模型权重，只提供：
+  - TinyLoRA / RL 相关代码；
+  - 数据处理脚本；
+  - 可选的 TinyLoRA 参数文件（例如 `tiny_lora_v.pt`）。
 
 ---
 
 ## 联系方式与引用
 
-如使用本项目作为基线或在论文中引用，请在引用中保留作者信息与项目链接。
+如果你在论文、博客或项目中使用了本仓库的代码或思路，欢迎在引用中保留作者信息与项目链接，也欢迎 issue / PR / 交流讨论：
+
+- 如何设计更稳定的代码奖励函数；
+- TinyLoRA Tiling 在不同模型、不同任务上的效果；
+- 在同样只训练 16 个参数的前提下，是否能进一步提升性能。
+
 
 ---
 
-## 依赖安装
+## English
 
-**重要：本项目代码基于最新版本的库编写，请务必使用最新版本以确保兼容性。**
+### Project overview
 
-```bash
-# 推荐使用最新版本（必须 >= 指定的最低版本）
-pip install -U \
-  torch>=2.10.0 \
-  transformers>=4.57.0 \
-  datasets>=4.5.0 \
-  accelerate>=1.12.0 \
-  peft>=0.18.0 \
-  trl>=0.27.0 \
-  bitsandbytes>=0.49.0 \
-  modelscope>=1.34.0
+LuoguQwen-RL is an experimental playground for **TinyLoRA-style parameter sharing + reinforcement learning for code generation** on Chinese OJ problems (Luogu).
 
-# 或使用 requirements.txt（推荐）
-pip install -r requirements.txt
-```
+This repository is intended as a **reproduction-and-adaptation** of the TinyLoRA idea described in the accompanying theory note:
 
----
+- See [theory/README.md](theory/README.md) for a high-level write-up of TinyLoRA, GRPO, hybrid engine issues (vLLM + PyTorch), and Truncated Importance Sampling.
+- The original setting focuses on math reasoning (e.g., GSM8K) with a 7B model and 13 trainable parameters.
+- Here we port the same philosophy to **code generation with compile-and-run rewards**, using a 3B coder base model and 16 shared parameters.
 
-## English (translation)
+Instead of large models and full-parameter fine-tuning, we go in the opposite direction:
 
-This repository provides example scripts and tools for LoRA fine-tuning of a Qwen instruction model. The repository includes training and evaluation scripts and example data. The following sections describe the project, quick start, how to obtain the base model, inference with LoRA weights, key training parameters, dataset sources, licensing, and contact information.
+- Base model: `Qwen2.5-Coder-3B-Instruct` (4-bit quantized with bitsandbytes).
+- Training paradigm: reinforcement learning with TRL's `GRPOTrainer`.
+- Parameter budget: only **16 trainable scalar parameters** for the whole model.
+- Task: generate C++ solutions that can **compile and pass sample test cases**.
 
-Contents
+Main components:
 
-- Project overview
-- Quick start
-- Download base model
-- Inference with LoRA weights
-- Training (SFT) key parameters
-- Dataset source
-- License and sharing
-- Contact
-- Dependencies
+- `train_rl.py`: TinyLoRA injection + GRPO training loop.
+- `convert_dataset.py`: converts local Luogu DPO-style data into JSONL with `prompt` and `test_cases` for RL.
+- `check_TinyLoRA.py`: verifies that only 16 parameters are trainable after TinyLoRA Tiling.
 
----
+### TinyLoRA Tiling
 
-## Project overview
+For each target `nn.Linear` layer (e.g., `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`):
 
-The repository contains examples for LoRA fine-tuning of the Qwen instruction model on Chinese contest problem data:
+1. Dequantize 4-bit weights (if needed) and perform SVD on CPU:
 
-- `train_sft.py`: LoRA fine-tuning using TRL's `SFTTrainer`.
-- `evaluate_model.py`: Example for offline inference using merged LoRA weights.
-- `download_dataset.py`: Download dataset.
-- `convert_dataset.py`: Convert the original dataset format to the `prompt`+`completion` format acceptable by `SFTTrainer`.
-- `check_format.py`: Check the converted format.
+   $$W \approx U S V^H$$
 
----
+   with a small rank (e.g., `rank=2`).
 
-## Quick start
+2. Register `U`, `S`, `V^H` as frozen buffers.
 
-**Note: This project code is written for the latest library versions. Please ensure you install the latest versions of dependencies to avoid compatibility issues.**
+3. Sample a fixed tensor `P ∈ R^{u×r×r}` and define a global shared vector `v ∈ R^u` (`u=16`).
 
-1. Create a virtual environment and install dependencies:
+4. Construct a low-rank adapter:
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+   $$R = \sum_{i=1}^{u} v_i P_i, \quad \Delta W = U S R V^H.$$
 
-# Or use Conda (recommended for environment isolation):
-conda create -n luoguqwen python=3.10 -y
-conda activate luoguqwen
-pip install -r requirements.txt
-```
+5. During forward pass:
 
-2. Download the base model (see below), set `LOCAL_MODEL_DIR` and `OUTPUT_DIR`, then run training:
+   $$y = x W^T + x (\Delta W)^T.$$
 
-```bash
-# Adjust the accelerate command for your environment
-accelerate launch train_sft.py
-```
+All target layers share the **same** `v`, so the entire model updates only 16 scalars.
 
-3. After training, run the inference example:
+### RL training with GRPO
 
-```bash
-python evaluate_model.py
-```
+- Dataset: JSONL file where each line contains:
 
----
+  ```json
+  {
+    "prompt": "problem statement in Markdown",
+    "test_cases": [
+      {"input": "...", "output": "..."}
+    ]
+  }
+  ```
 
-## Download base model
+- Training loop (in `train_rl.py`):
+  - Load Qwen2.5-Coder-3B-Instruct in 4-bit.
+  - Inject TinyLoRALinear layers and freeze everything except the shared 16-dim vector.
+  - Use `GRPOTrainer` with a custom reward function that compiles and runs C++ code.
 
-Recommended base: `qwen/Qwen2.5-1.5B-Instruct` (ModelScope). Example acquisition methods:
+Example hyperparameters (see `GRPOConfig` in `train_rl.py`):
 
-- From ModelScope (the training script uses `snapshot_download`):
+- `num_train_epochs=1`
+- `per_device_train_batch_size=1`
+- `gradient_accumulation_steps=8`
+- `learning_rate=1e-5`
+- `num_generations=4`
+- `max_completion_length=512`
+- `bf16=True`
 
-```python
-from modelscope.hub.snapshot_download import snapshot_download
-snapshot_download(repo_id="qwen/Qwen2.5-1.5B-Instruct", local_dir="./models/Qwen2.5-1.5B-Instruct")
-```
+You can tune these according to your GPU memory and time budget.
 
-- Or via Hugging Face (if available and permitted):
+### Code-based reward function
 
-```python
-from transformers import AutoTokenizer, AutoModelForCausalLM
-tokenizer = AutoTokenizer.from_pretrained("qwen/Qwen2.5-1.5B-Instruct")
-model = AutoModelForCausalLM.from_pretrained("qwen/Qwen2.5-1.5B-Instruct")
-```
+The reward function `code_reward_func` uses `compile_and_run` to evaluate each generated answer:
 
-Note: base models are large and carry separate license terms. Follow the provider's terms. This repository does not include the full base model files.
+1. Extract C++ code from the model output (prefer fenced blocks like ```cpp ... ```; fallback to raw text containing `#include`).
+2. Strip `freopen(...)` calls to avoid file I/O and keep I/O via stdin/stdout.
+3. Write code to a temporary file and compile with `g++ -O2`.
+4. For each test case, feed `input` to stdin and compare stdout to `output`.
+5. Reward is the fraction of passed test cases in `[0.0, 1.0]`.
 
----
+Compilation errors, timeouts, or runtime errors yield zero reward.
 
-## Inference with LoRA weights
+### Environment & requirements
 
-After training, `output/luoguqwen-lora/` (or `OUTPUT_DIR` in `train_sft.py`) will contain LoRA weights and tokenizer files.
+- OS: Linux strongly recommended (current code is developed and tested on Linux).
+- Compiler: a working `g++` available in `$PATH`.
+- Python: 3.10+.
+- Dependencies: install via
 
-Note: The LoRA weights for this project have also been uploaded to ModelScope at:
-https://www.modelscope.cn/models/yuhanChi/Qwen4Luogu/tree/master/output/luoguqwencoder-lora .
-You can download the files from that page and place them under the local `output/luoguqwencoder-lora/` directory, or point your loading code to that directory, then follow the steps below to load and optionally merge the adapter weights.
+  ```bash
+  pip install -r requirements.txt
+  ```
 
-Recommended process:
+`requirements.txt` includes `torch`, `transformers`, `datasets`, `accelerate`, `trl`, `peft`, `bitsandbytes`, `modelscope`, etc.
 
-1. Load the base model and tokenizer, use `peft` to load LoRA weights, optionally merge weights to improve inference performance.
+### License
 
-```python
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from peft import PeftModel
+- Code in this repository is released under the MIT License (see `LICENSE`).
+- The base model `Qwen2.5-Coder-3B-Instruct` is provided by Qwen under its own license; you must obtain and use it under the original terms.
+- This repo does **not** redistribute full base model weights; only scripts and (optionally) small TinyLoRA parameters like `tiny_lora_v.pt`.
 
-base = AutoModelForCausalLM.from_pretrained("./models/Qwen2.5-1.5B-Instruct", device_map="auto", torch_dtype="auto", trust_remote_code=True)
-tokenizer = AutoTokenizer.from_pretrained("./models/Qwen2.5-1.5B-Instruct", trust_remote_code=True)
-model = PeftModel.from_pretrained(base, "./output/luoguqwen-lora")
-model = model.merge_and_unload()
+If you build on this project or use it in academic work, please consider citing the repository and sharing your findings—especially if you explore new reward designs or push the limits of "only 16 trainable parameters" in other domains.
 
-# Use model.generate for inference
-```
 
-2. `evaluate_model.py` includes a minimal inference example that generates results and saves them to `evaluation_results/evaluation_results.json`.
-
-If only publishing LoRA weights, please explain in the README that users need to download the base model themselves and provide the path.
-
----
-
-## Training (SFT) key parameters
-
-**Note: This project uses TRL 0.27+ new features (such as SFTConfig and ChatML format), please ensure TRL version >= 0.27.0.**
-
-Example hyperparameters used in `train_sft.py`:
-
-- LoRA: `r=16`, `lora_alpha=32`, `lora_dropout=0.05`, target modules: `q_proj, k_proj, v_proj, o_proj`.
-- Training: `num_train_epochs=2`, `per_device_train_batch_size=1`, `gradient_accumulation_steps=16`, `learning_rate=2e-4`.
-- Optional: Use 4-bit (bnb NF4) quantization to save VRAM.
-
-The above parameters are examples. Please adjust hyperparameters based on data size and VRAM to achieve stable results.
-
----
-
-## Dataset source
-
-Example data is located in `dataset_example/`, used to demonstrate format. 
-Online dataset link (Hugging Face):
-
-- https://huggingface.co/datasets/Misaka114514/luogu_dpo
-
-Example loading method:
-
-```python
-from datasets import load_dataset
-dataset = load_dataset("Misaka114514/luogu_dpo")
-```
-
-When publishing data, please be aware of copyright and privacy. Only include data in the repository if you have permission to share it; otherwise, provide data acquisition or processing scripts and note the source and license.
-
----
-
-## License and sharing
-
-- This repository's example scripts use the MIT license (see `LICENSE`).
-- The base model (`qwen/Qwen2.5-1.5B-Instruct`) is provided by third parties. Please comply with its original license and obtain the base model yourself. This repository does not assume distribution rights for the base model.
-- Recommended repository contents to publish:
-  - `train_sft.py`, `evaluate_model.py`, `requirements.txt`, `dataset_example/` (if shareable), and LoRA weights folder `output/luoguqwen-lora/`.
-  - It is not recommended to host the full base model `models/` in the repository, as both size and licensing make it unsuitable for direct hosting.
-
-Notes on uploading LoRA weights to GitHub:
-
-- LoRA weights are typically tens to hundreds of MB, can be committed directly or managed with Git LFS. If using Git LFS, note it in the README and ensure collaborators install LFS.
-- This repository's `.gitignore` suggests excluding the base model directory `models/` and large temporary checkpoints, while allowing `output/luoguqwen-lora/` to be published.
-
----
-
-## Contact
-
-If using this project as a baseline or citing it in papers, please retain author information and project links in citations.
-
----
-
-## Dependencies
-
-**Important: This project code is written for the latest library versions. Please use the latest versions to ensure compatibility.**
-
-```bash
-# Recommended to use latest versions (must be >= specified minimum versions)
-pip install -U \
-  torch>=2.10.0 \
-  transformers>=4.57.0 \
-  datasets>=4.5.0 \
-  accelerate>=1.12.0 \
-  peft>=0.18.0 \
-  trl>=0.27.0 \
-  bitsandbytes>=0.49.0 \
-  modelscope>=1.34.0
-
-# Or use requirements.txt (recommended)
-pip install -r requirements.txt
+```bibtex
+@article{morris2026learning,
+  title={Learning to Reason in 13 Parameters},
+  author={Morris, John X and Mireshghallah, Niloofar and Ibrahim, Mark and Mahloujifar, Saeed},
+  journal={arXiv preprint arXiv:2602.04118},
+  year={2026}
+}
 ```
