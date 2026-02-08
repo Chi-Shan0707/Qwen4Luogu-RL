@@ -68,14 +68,16 @@ LuoguQwen-RL 的目标是：
 - `convert_dataset.py`：
   - 从本地洛谷题目数据（Markdown 风格）中用正则抽取 `prompt`（题面）与 `test_cases`（输入输出样例）；
   - 过滤掉包含中文的样例，转存为 JSONL，供 RL 训练使用。
-- `check_TinyLoRA.py`：
-  - 与 `train_rl.py` 中相同的 TinyLoRA 注入流程；
-  - 统计模型总参数量与可训练参数量，验证「只训练 16 个参数」是否真的生效。
+- `download_dataset.py`：
+  - 从 Hugging Face 下载 DPO 格式的洛谷数据集并保存到 `./local_luogu_dpo`（供 `convert_dataset.py` 使用）。
+- `verify_pipeline.py`：
+  - 用于验证模型加载、生成、代码提取与编译运行的端到端流水线（示例：加载模型并尝试用给定样例对生成代码进行编译运行评测）。
 
 目录结构（节选）：
 
 - `train_rl.py`：主训练脚本（TinyLoRA + GRPO）。
-- `check_TinyLoRA.py`：TinyLoRA 参数检查脚本。
+- `download_dataset.py`：从 Hugging Face 下载 DPO 格式数据并保存到 `./local_luogu_dpo`。
+- `verify_pipeline.py`：验证 model->generate->extract->compile 流程的脚本。
 - `convert_dataset.py`：将本地洛谷 DPO 数据转为 RL JSONL 格式。
 - `local_luogu_dpo/`：从原 DPO 数据集转存的本地数据（`load_from_disk` 产物）。
 - `local_luogu_rl/luogu_rl_data.jsonl`：RL 训练数据（`convert_dataset.py` 输出）。
@@ -119,7 +121,7 @@ LuoguQwen-RL 的目标是：
 - **极致参数压缩**：
   - 整个模型的可训练参数只有一个向量 `global_v ∈ R^{16}`；
   - 全网所有被替换的 Linear 层都共享这 16 个标量；
-  - `check_TinyLoRA.py` 会输出总参数量 / 可训练参数量 / 压缩率。
+  - 你可以通过运行 `train_rl.py` 或 `verify_pipeline.py` 来查看模型参数信息（总参数量 / 可训练参数量 / 压缩率）。
 
 - **TinyLoRA Tiling**：
   - 对原始 Linear 权重（包括 4bit 量化权重）做 SVD 分解，得到固定的骨架 `U, S, Vh`；
@@ -190,24 +192,23 @@ python convert_dataset.py
 - 将结果写入 `./local_luogu_rl/luogu_rl_data.jsonl`；
 - 同时把提取失败的题面写入 `./local_luogu_rl/failed_extraction.jsonl` 以便人工排查。
 
-### 4. 检查 TinyLoRA 注入是否正确（可选）
+### 4. 可选：验证流水线与数据下载
 
-在真正训练前，可以先跑一遍：
+在真正训练前，可执行以下脚本进行检查与准备：
+
+- 下载 DPO 数据集（如果你还没下载）：
 
 ```bash
-python check_TinyLoRA.py
+python download_dataset.py
 ```
 
-你会看到：
+- 验证端到端流水线（模型加载、生成、代码提取与编译运行的示例）：
 
-- 被替换为 `TinyLoRALinear` 的模块数量（比如若干 `q_proj / k_proj / v_proj / o_proj / gate_proj / up_proj / down_proj`）；
-- 模型总参数量；
-- 当前可训练参数量是否为 16；
-- 参数压缩率（通常是一个非常夸张的小数）。
+```bash
+python verify_pipeline.py
+```
 
-如果最终输出中提示：
-
-> `>>> 成功！当前仅训练 16 个参数 (TinyLoRA Tiling 生效) <<<`
+`verify_pipeline.py` 会加载 tokenizer 和模型（若本地不存在则使用远端 ID），对预设 JSON 示例生成代码、提取并尝试编译运行样例，从而帮助你验证环境是否完整（例如是否安装 `g++`、模型与 tokenizer 配置是否正确等）。
 
 说明 TinyLoRA 注入与参数冻结逻辑是正常的。
 
@@ -368,7 +369,7 @@ GRPO 的整体流程简要为：
    - 模型中所有目标 `nn.Linear` 层都共享同一个 `v`；
    - 整个模型只有这一组 16 维参数在更新。
 
-`check_TinyLoRA.py` 会统计并打印可训练参数量，以验证上述逻辑是否被正确应用。
+你可以通过 `verify_pipeline.py` 或直接观察 `train_rl.py` 的启动日志来确认 TinyLoRA 注入是否正确并检查可训练参数量。
 
 ---
 
@@ -479,7 +480,8 @@ Main components:
 
 - `train_rl.py`: TinyLoRA injection + GRPO training loop.
 - `convert_dataset.py`: converts local Luogu DPO-style data into JSONL with `prompt` and `test_cases` for RL.
-- `check_TinyLoRA.py`: verifies that only 16 parameters are trainable after TinyLoRA Tiling.
+- `download_dataset.py`: downloads DPO-format Luogu dataset from Hugging Face into `./local_luogu_dpo`.
+- `verify_pipeline.py`: verifies the end-to-end pipeline (model load, generation, code extraction, compilation & run).
 
 ### TinyLoRA Tiling
 

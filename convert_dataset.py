@@ -1,5 +1,6 @@
 import re
 import json
+import os
 from datasets import load_from_disk
 from tqdm import tqdm
 
@@ -8,6 +9,9 @@ from tqdm import tqdm
 DATASET_PATH = "./local_luogu_dpo" 
 # 输出文件路径
 OUTPUT_FILE = "./local_luogu_rl/luogu_rl_data.jsonl"
+# 确保输出目录存在（用于保存转换后的 RL 数据与失败案例）
+os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
+
 def contains_chinese(text):
     """检查文本是否包含中文字符"""
     return bool(re.search(r'[\u4e00-\u9fa5]', text))

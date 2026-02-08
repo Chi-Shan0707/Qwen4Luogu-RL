@@ -342,7 +342,7 @@ print("✅ 已设置 _hf_peft_config_loaded=True，绕过 Trainer 的量化模�
 def apply_chat_template(example):
     # 构建 Qwen 的标准对话格式
     messages = [
-        {"role": "system", "content": "你是一个智能编程助手。请直接输出满足题目要求的C++代码。"},
+        {"role": "system", "content": "你是优秀的c++专家。推理部分内容控制在128token以内。代码要严格按照传统c++编写。"},
         {"role": "user", "content": example['prompt']}
     ]
     # 使用 tokenizer 自动应用模版（不生成，只转字符串）
@@ -376,6 +376,9 @@ rl_dataset = rl_dataset.map(apply_chat_template)
 # 2. (可选) 打印一条数据验证一下
 print(f"数据加载成功！样本数量: {len(rl_dataset)}")
 print(f"样例数据: {rl_dataset[0]}")
+
+
+
 # ========== 配置并启动 GRPO 训练 ==========
 # 配置 GRPO
 training_args = GRPOConfig(
