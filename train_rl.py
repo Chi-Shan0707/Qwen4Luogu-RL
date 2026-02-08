@@ -262,6 +262,22 @@ def code_reward_func(completions, solution, **kwargs):
             
     return rewards
 
+# 当你使用 load_dataset("json", data_files="....jsonl") 时，
+# Hugging Face 会默认把你提供的这个文件归类为 train 分区（这是它的默认行为）。
+# 注意：data_files 指向你 convert_dataset.py 生成的具体文件路径
+# split="train" 很重要！因为 load_dataset 默认返回 DatasetDict，
+# 而 Trainer 需要的是 Dataset 对象，指定 split="train" 直接拿到数据。
+rl_dataset = load_dataset(
+    "json", 
+    data_files="./local_luogu_rl/luogu_rl_data.jsonl", 
+    # 确认这里的路径和你 convert_dataset.py 里的 OUTPUT_FILE 一致
+    split="train"
+)
+
+# 2. (可选) 打印一条数据验证一下
+print(f"数据加载成功！样本数量: {len(rl_dataset)}")
+print(f"样例数据: {rl_dataset[0]}")
+# ========== 配置并启动 GRPO 训练 ==========
 # 配置 GRPO
 training_args = GRPOConfig(
     output_dir=OUTPUT_DIR,
