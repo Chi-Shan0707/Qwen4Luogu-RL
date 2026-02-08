@@ -340,17 +340,23 @@ model._hf_peft_config_loaded = True
 print("✅ 已设置 _hf_peft_config_loaded=True，绕过 Trainer 的量化模型检查")
 
 def apply_chat_template(example):
+    # 
+    # 删除数据中可能包含的冗余指令句，防止模型重复说明（仅一行修改）
+    # 可删
+    example['prompt'] = example['prompt'].replace("你将得到一个编程竞赛题目。请逐步推理解决方案，然后用C或C++提供完整的实现。请勿包含任何调试信息或额外输出。", "")
+    
+    # ======================
     # 构建 Qwen 的标准对话格式
     messages = [
-        {"role": "system", "content": "你是优秀的c++专家。推理部分内容控制在128token以内。代码要严格按照传统c++编写。"},
+        {"role": "system", "content": "你是优秀的c++专家。要求你直接输出c++代码，如果需要输出思考过程辅助推理，也必须将思考过程限制在128个token内"},
         {"role": "user", "content": example['prompt']}
     ]
     # 使用 tokenizer 自动应用模版（不生成，只转字符串）
     # 结果类似：<|im_start|>system...<|im_end|><|im_start|>user...<|im_end|><|im_start|>assistant
     example['prompt'] = tokenizer.apply_chat_template(
         messages, 
-        tokenize=False, 
-        add_generation_prompt=True
+        tokenize=False,         # 不急着变为张量，这样字符串层面还能进行拼接
+        add_generation_prompt=True     # 上下文的边界
     )
     return example
 
