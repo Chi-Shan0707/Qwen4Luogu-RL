@@ -12,7 +12,7 @@ from trl import GRPOTrainer, GRPOConfig
 from modelscope.hub.snapshot_download import snapshot_download
 import optimum
 import bitsandbytes as bnb
-
+from peft import prepare_model_for_kbit_training
 
 
 # ========== 模型配置 ==========
@@ -58,13 +58,21 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 model.config.use_cache = False
 
+# 准备模型进行 k-bit 训练
+model = prepare_model_for_kbit_training(model)
+
 
 
 # ========== 定义 TinyLoRA 层 ==========
 
-# 创建一个全局共享的向量 v (实现论文提到的 Tiling)
-global_v = nn.Parameter(torch.zeros(16)) 
+# 获取模型第一层的设备 (通常是 cuda:0)
+device = model.model.layers[0].self_attn.q_proj.weight.device
+print(f"模型主设备: {device}")
+
+# 直接在 GPU 上创建 global_v，并设为 bfloat16
+global_v = nn.Parameter(torch.zeros(16, device=device, dtype=torch.bfloat16))
 global_v.requires_grad = True
+
 
 class TinyLoRALinear(nn.Module):
     def __init__(self, original_layer, rank = 2, u = 16, shared_v =None):
@@ -131,12 +139,16 @@ class TinyLoRALinear(nn.Module):
         # 唯一的可训练参数 v (如果传入 shared_v 则实现参数共享)
 
         if shared_v is not None:
-            # 处理多卡/多设备时的共享引用问题
+            # 严查设备是否一致
             if shared_v.device != original_device:
-                 # 如果设备不一致，创建一个不共享梯度的副本（这是一个妥协，严谨的共享需要 DDP 同步）
-                 self.v = nn.Parameter(shared_v.data.to(original_device).clone())
-            else:
-                 self.v = shared_v
+                raise RuntimeError(
+                    f"设备不匹配！shared_v 在 {shared_v.device}, "
+                    f"但当前层在 {original_device}。\n"
+                    "在单卡训练中，请确保 global_v 和模型都在同一张卡上。"
+                )
+            
+            # 直接引用！不要 clone，不要 nn.Parameter
+            self.v = shared_v 
         else:
             self.v = nn.Parameter(torch.zeros(u, device=original_device, dtype=target_dtype))
 
