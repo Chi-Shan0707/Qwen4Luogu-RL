@@ -292,6 +292,8 @@ OUTPUT_DIR = "./output/luoguqwencoder-lora"
 
 ### 上游数据：洛谷题目（DPO 版）
 
+- **数据来源**：Hugging Face 数据集 `Misaka114514/luogu_dpo`（https://huggingface.co/datasets/Misaka114514/luogu_dpo）。*在此谢过！*
+
 原始数据形态大致为：
 
 - 字段 `conversations`：一个对话列表；
@@ -618,7 +620,7 @@ Training saves `output/tiny_lora_v.pt` containing `global_v` and reconstruction 
 
 ### Data Preparation and Format
 
-- **Source**: DPO-formatted Luogu data.
+- **Source**: DPO-formatted Luogu data — Hugging Face dataset `Misaka114514/luogu_dpo` (https://huggingface.co/datasets/Misaka114514/luogu_dpo).*Thank you, Misaka114514!*
 - **RL Format**: Each line in `luogu_rl_data.jsonl` contains:
   - `prompt`: Problem statement in Markdown.
   - `test_cases`: List of dictionary pairs with `input` and `output`.
