@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import os
+import sys
 from datasets import load_dataset, load_from_disk
 from transformers import (
     AutoTokenizer,
@@ -11,6 +12,10 @@ from peft import prepare_model_for_kbit_training
 from trl import GRPOTrainer, GRPOConfig
 from modelscope.hub.snapshot_download import snapshot_download
 import bitsandbytes as bnb
+
+# ========== 命令行参数：u 值 ==========
+U_VALUE = int(sys.argv[1]) if len(sys.argv) > 1 else 16
+print(f"TinyLoRA 参数 u 值: {U_VALUE}")
 
 
 # ========== 模型配置 ==========
@@ -80,11 +85,14 @@ class TinyLoRAGlobalParams(nn.Module):
         return self.global_v
 
 # 创建全局参数容器
-global_params = TinyLoRAGlobalParams(u_dim=16, device=device, dtype=torch.bfloat16)
+global_params = TinyLoRAGlobalParams(u_dim=U_VALUE, device=device, dtype=torch.bfloat16)
 
 
 class TinyLoRALinear(nn.Module):
-    def __init__(self, original_layer, rank = 2, u = 16, global_params_ref=None):
+    def __init__(self, original_layer, rank = 2, u = None, global_params_ref=None):
+        if u is None:
+            u = U_VALUE
+
     # R= v_1 P_1 + v_2 P_2 + ... + v_u P_u
     # v都是scalar
     # P都是rank x rank的矩阵
@@ -184,7 +192,7 @@ def apply_tiny_lora(model, global_params_ref):
         # 如果是目标 Linear 层
         if isinstance(child, (nn.Linear, bnb.nn.Linear4bit)) and any(name.endswith(s) for s in target_suffixes):
             # 1. 创建 TinyLoRA 层，传入 global_params 容器的引用
-            new_layer = TinyLoRALinear(child, rank=2, u=16, global_params_ref=global_params_ref)
+            new_layer = TinyLoRALinear(child, rank=2, u=U_VALUE, global_params_ref=global_params_ref)
             
             # 2. 替换掉原模块 (Monkey Patch)
             setattr(model, name, new_layer)
@@ -226,17 +234,19 @@ trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 all_params = sum(p.numel() for p in model.parameters())
 print(f"\n总参数量: {all_params:,}")
 print(f"可训练参数量: {trainable_params}")
-if trainable_params != 16:
-    raise RuntimeError(f"警告：可训练参数数量为 {trainable_params}，预期为 16！")
+if trainable_params != U_VALUE:
+    raise RuntimeError(f"警告：可训练参数数量为 {trainable_params}，预期为 {U_VALUE}！")
 
 import re
 import subprocess
 import tempfile
 import os
 
-def compile_and_run(code, test_cases):
+def compile_and_run(code, test_case):
     """
-    编译并运行代码，返回通过率 (0.0 ~ 1.0)
+    编译并运行代码（单个样例），返回 reward
+    test_case: dict，包含 'input' 和 'output'
+    返回值：0.0（编译失败） / 0.5（编译成功但样例失败） / 1.0（成功）
     """
     code = re.sub(r'freopen\s*\(.*?\);', '', code, flags=re.IGNORECASE)
     # 1. 创建临时目录 (用完即删，防止垃圾文件堆积)
@@ -256,51 +266,49 @@ def compile_and_run(code, test_cases):
                 capture_output=True, text=True, timeout=5
             )
             if compile_result.returncode != 0:
-                return 0.0 # 编译失败
+                return 0.0  # 编译失败
         except subprocess.TimeoutExpired:
-            return 0.0 # 编译超时
+            return 0.0  # 编译超时
 
-        # 4. 运行测试用例
-        passed_count = 0
-        total_cases = len(test_cases)
+        # 4. 运行单个测试用例
+        input_data = test_case['input']
+        expected_output = test_case['output'].strip()
         
-        if total_cases == 0:
-            return 0.0
-
-        for case in test_cases:
-            input_data = case['input']
-            expected_output = case['output'].strip()
+        try:
+            # 关键：使用 input=input_data 模拟 freopen/cin
+            # timeout=2 秒，防止死循环
+            run_result = subprocess.run(
+                [exe_file],
+                input=input_data,
+                capture_output=True,
+                text=True,
+                timeout=2 
+            )
             
-            try:
-                # 关键：使用 input=input_data 模拟 freopen/cin
-                # timeout=2 秒，防止死循环 (非常重要！！！)
-                run_result = subprocess.run(
-                    [exe_file],
-                    input=input_data,
-                    capture_output=True,
-                    text=True,
-                    timeout=2 
-                )
-                
-                # 获取模型输出并去首尾空格
-                actual_output = run_result.stdout.strip()
-                
-                # 简单比对 (也可以根据需要改成浮点数比对等)
-                if actual_output == expected_output:
-                    passed_count += 1
+            # 获取模型输出并去首尾空格
+            actual_output = run_result.stdout.strip()
+            
+            # 判断是否通过
+            if actual_output == expected_output:
+                return 1.0  # 测试通过
+            else:
+                return 0.5  # 样例失败（但编译成功）
                     
-            except subprocess.TimeoutExpired:
-                pass # 运行超时算错
-            except Exception:
-                pass # 运行时错误(RE)算错
-
-        return passed_count / total_cases
+        except subprocess.TimeoutExpired:
+            return 0.5  # 运行超时（编译成功但样例失败）
+        except Exception:
+            return 0.5  # 运行时错误（编译成功但样例失败）
 
 def code_reward_func(completions, test_cases, **kwargs):
     """
     GRPO 要求的 Reward Function 格式
     completions: list[str], 模型生成的多个回复
-    test_cases: list[list[dict]], 对应的测试用例（注意 GRPO 传进来的是 batch）
+    test_cases: list[list[dict]], 对应的测试用例（每题一个样例）
+    
+    Reward 规则：
+    - 编译失败或代码格式无效：0.0
+    - 编译成功但样例失败：0.5
+    - 编译成功且通过样例：1.0
     """
     rewards = []
     
@@ -315,14 +323,20 @@ def code_reward_func(completions, test_cases, **kwargs):
             if "#include" in completion:
                 code = completion
             else:
-                rewards.append(0.0) # 格式完全不对
+                rewards.append(0.0)  # 格式完全不对
                 continue
         else:
             code = match.group(1)
 
-        # 2. 评测
-        score = compile_and_run(code, cases)
-        rewards.append(score)
+        # 2. 评测（单个样例）
+        # 由于只有一个样例，直接取 cases[0]
+        test_case = cases[0] if cases else None
+        if test_case is None:
+            rewards.append(0.0)
+            continue
+        
+        reward = compile_and_run(code, test_case)
+        rewards.append(reward)
         
     return rewards
     
@@ -348,7 +362,7 @@ def apply_chat_template(example):
     # ======================
     # 构建 Qwen 的标准对话格式
     messages = [
-        {"role": "system", "content": "你是优秀的c++专家。要求你直接输出c++代码，如果需要输出思考过程辅助推理，也必须将思考过程限制在128个token内"},
+        {"role": "system", "content": "你是编程竞赛专家。要求你直接输出c++代码。你必须输出能正确运行且能正确解答问题的代码。如果需要输出思考，也必须将思考过程限制在128个token内。"},
         {"role": "user", "content": example['prompt']}
     ]
     # 使用 tokenizer 自动应用模版（不生成，只转字符串）

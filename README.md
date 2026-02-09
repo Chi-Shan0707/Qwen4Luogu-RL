@@ -1,4 +1,4 @@
-# LuoguQwen-RL — TinyLoRA 代码强化学习实验
+# LuoguQwen-RL — TinyLoRA 实验
 
 本仓库是原「LuoguQwen LoRA 微调」，一个[基于 SFT的项目](https://github.com/Chi-Shan0707/Qwen4Luogu-SFT)的进化版：
 
@@ -29,6 +29,15 @@
 - token数量截取的太少，目前是1024，但是这个也会带来成本
 - GRPO时生成答案数量太少
 - luogu题目太难
+- RL的reward写的不够好
+- 3B模型比较差<br>
+
+<br>
+
+`train_rl.py`中支持修改
+- 更换模型，如采用Qwen2.5-7B
+- GRPO的config
+- reward
 - ...
 
 ---
@@ -220,18 +229,30 @@ python verify_pipeline.py
 
 ### 5. 启动 RL 训练
 
+基础用法（使用默认u=16）：
+
 ```bash
 python train_rl.py
 ```
+
+自定义 TinyLoRA 参数数量（u 值）：
+
+```bash
+python train_rl.py 32     # 使用 u=32（32 个可训练参数）
+python train_rl.py 8      # 使用 u=8（8 个可训练参数）
+```
+
+> **说明**：第一个命令行参数用于指定 TinyLoRA 中共享向量 `global_v` 的维度，即可训练参数的总数。若不提供此参数，则默认使用 `u=16`。
 
 `train_rl.py` 将会：
 
 1. 确保基座模型已准备好（必要时自动下载）；
 2. 以 4bit 量化方式加载 `Qwen2.5-Coder-3B-Instruct`；
-3. 注入 TinyLoRA Tiling（全局共享 `global_v`）；
-4. 从 `./local_luogu_rl/luogu_rl_data.jsonl` 读取 RL 数据；
-5. 使用 `GRPOTrainer` 进行强化学习；
-6. 训练完成后，将 `global_v` 保存为 `output/tiny_lora_v.pt`。
+3. 根据命令行参数创建 u 维的共享向量；
+4. 注入 TinyLoRA Tiling（全局共享 `global_v`）；
+5. 从 `./local_luogu_rl/luogu_rl_data.jsonl` 读取 RL 数据；
+6. 使用 `GRPOTrainer` 进行强化学习；
+7. 训练完成后，将 `global_v` 保存为 `output/tiny_lora_v.pt`。
 
 如果你想自定义输出目录，可以修改 `train_rl.py` 顶部的：
 
@@ -308,8 +329,8 @@ rl_dataset = load_dataset(
    - 通过 `device_map="auto"` 将模型自动切分到可用 GPU。
 
 2. **TinyLoRA 注入与参数冻结**
-   - 创建全局共享向量：
-     - `global_v = nn.Parameter(torch.zeros(16))`
+   - 创建全局共享向量（维度由命令行参数 `u` 决定，默认16）：
+     - `global_v = nn.Parameter(torch.zeros(U_VALUE))`
    - 通过 `apply_tiny_lora(model, global_v)`：
      - 遍历模型子模块；
      - 找到名字以 `q_proj / k_proj / v_proj / o_proj / gate_proj / up_proj / down_proj` 结尾的 `nn.Linear`；
@@ -414,11 +435,21 @@ GRPO 的整体流程简要为：
 
 4. **打分规则**
 
-   - 若总共有 `N` 个测试用例，通过了 `k` 个，则 reward：
+   奖励函数采用三档评分制：
 
-     $$\text{reward} = \frac{k}{N} \in [0, 1]$$
+   - **编译失败** 或 **代码格式无效**：`reward = 0`
+     - 包括编译错误、编译超时、无法提取代码块等情况；
+   
+   - **编译成功但测试用例失败**：`reward = 0.5`
+     - 代码能通过 g++ 编译，但运行后不能通过全部样例测试（可能通过部分或全部失败）；
+   
+   - **编译成功且通过所有测试用例**：`reward = 1.0`
+     - 代码既能编译成功，也能在所有提供的样例上产生正确输出。
 
-   - 编译失败 / 全部用例失败：reward=0。
+   **核心强化信号**：
+   - 这种设计鼓励模型先学会生成「能编译的代码」（0 → 0.5 的进步），
+   - 然后在编译基础上进一步优化逻辑以通过测试用例（0.5 → 1.0 的进步）。
+   - 相比连续打分，离散 reward 提供了更清晰的学习阶段划分。
 
 > 这意味着模型不仅要「看起来像 C++」，还要真的能通过样例输入输出，
 > 强化信号来自真实的编译器与运行环境，而非静态打分。
