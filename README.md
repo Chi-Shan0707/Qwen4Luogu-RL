@@ -44,19 +44,19 @@
 
 ## 目录
 
-- 项目概述
-- 论文复现
-- 核心特点
-- 快速开始
-- 数据准备与格式
-- 训练流程（RL / GRPO）
-- TinyLoRA Tiling 技术细节
-- 奖励函数：编译运行 C++ 代码
-- 资源消耗与注意事项
-- 开源与许可证
-- 联系方式
-- English
-- 论文引用
+- [项目概述](#项目概述)
+- [论文复现](#论文复现)
+- [核心特点](#核心特点)
+- [快速开始](#快速开始)
+- [数据准备与格式](#数据准备与格式)
+- [训练流程（RL / GRPO）](#训练流程rl--grpo)
+- [TinyLoRA Tiling 技术细节](#tinylora-tiling-技术细节)
+- [奖励函数：编译运行 C++ 代码](#奖励函数编译运行-c-代码)
+- [资源消耗与注意事项](#资源消耗与注意事项)
+- [开源与许可证](#开源与许可证)
+- [引用](#引用)
+- [English](#english)
+
 
 ---
 
@@ -97,7 +97,7 @@ LuoguQwen-RL 的目标是：
 - `local_luogu_dpo/`：从原 DPO 数据集转存的本地数据（`load_from_disk` 产物）。
 - `local_luogu_rl/luogu_rl_data.jsonl`：RL 训练数据（`convert_dataset.py` 输出）。
 - `models/Qwen2.5-Coder-3B-Instruct/`：基座模型目录（可通过 ModelScope 自动下载）。
-- `output/`：RL 训练输出目录（包括最终的 `tiny_lora_v.pt`）。
+- `output/`：RL 训练输出目录（包括最终的 `tiny_lora_v.pt`，内含 `global_v` 向量及重建所需的元信息）。
 
 ---
 ## 论文复现
@@ -146,7 +146,7 @@ LuoguQwen-RL 的目标是：
 - **真实代码环境奖励**：
   - 把模型生成的 C++ 代码写入临时文件；
   - 使用系统 `g++` 编译；
-  - 为每道题运行多个输入输出样例，按通过率返回 `0.0 ~ 1.0` 之间的 reward；
+  - 三档离散 reward：编译失败=0，编译成功但样例错误=0.5，通过样例=1.0；
   - 代码不通过编译 / 超时 / 运行错误 -> reward 直接趋近于 0。
 
 - **显存友好**：
@@ -229,7 +229,7 @@ python verify_pipeline.py
 
 ### 5. 启动 RL 训练
 
-基础用法（使用默认u=16）：
+基础用法（使用默认u=16，训练全部数据）：
 
 ```bash
 python train_rl.py
@@ -242,7 +242,17 @@ python train_rl.py 32     # 使用 u=32（32 个可训练参数）
 python train_rl.py 8      # 使用 u=8（8 个可训练参数）
 ```
 
-> **说明**：第一个命令行参数用于指定 TinyLoRA 中共享向量 `global_v` 的维度，即可训练参数的总数。若不提供此参数，则默认使用 `u=16`。
+限制训练样本数量：
+
+```bash
+python train_rl.py 16 100      # u=16，仅训练前 100 个样本
+python train_rl.py 32 50       # u=32，仅训练前 50 个样本
+python train_rl.py 16          # u=16，训练全部样本（第二个参数可省略）
+```
+
+> **参数说明**：
+> - **第一个参数** `u`：TinyLoRA 中共享向量 `global_v` 的维度，即可训练参数的总数。若不提供，则默认使用 `u=16`。
+> - **第二个参数** `MAX_SAMPLES`：最多训练的样本数量。若不提供，则使用全部数据集。这个参数在快速实验、调试超参数或显存不足时非常有用。 目前是shuffle后取数据集（原数据集每道题目会出现2次），故如此。（目前种子是全局的TINYLORA_SEED。）
 
 `train_rl.py` 将会：
 
@@ -251,8 +261,24 @@ python train_rl.py 8      # 使用 u=8（8 个可训练参数）
 3. 根据命令行参数创建 u 维的共享向量；
 4. 注入 TinyLoRA Tiling（全局共享 `global_v`）；
 5. 从 `./local_luogu_rl/luogu_rl_data.jsonl` 读取 RL 数据；
-6. 使用 `GRPOTrainer` 进行强化学习；
-7. 训练完成后，将 `global_v` 保存为 `output/tiny_lora_v.pt`。
+6. 若指定了 `MAX_SAMPLES`，则仅选取前 N 个样本进行训练；
+7. 使用 `GRPOTrainer` 进行强化学习；
+8. 训练完成后，将训练结果保存为 `output/tiny_lora_v.pt`。
+
+**保存内容**：`tiny_lora_v.pt` 是一个 dict，包含还原模型所需的全部信息：
+
+```python
+{
+    "global_v": tensor([...]),     # 训练好的 v 向量，shape=(u,)
+    "u_value": 32,                 # v 的维度
+    "rank": 2,                     # TinyLoRA 的 rank
+    "seed": 42,                    # P 矩阵的随机种子（用于复现）
+    "model_id": "qwen/Qwen2.5-Coder-3B-Instruct",  # 基座模型 ID
+    "total_replaced_layers": 252,  # 替换的层数
+}
+```
+
+> **还原方式**：加载基座模型 → 用相同 `seed` 固定随机种子 → 用相同 `u_value` 和 `rank` 执行 `apply_tiny_lora` → 将 `global_v` 加载回 `global_params.global_v`。种子相同保证 P 矩阵完全一致，SVD 是确定性运算所以 U/S/Vh 也一致。
 
 如果你想自定义输出目录，可以修改 `train_rl.py` 顶部的：
 
@@ -479,134 +505,158 @@ GRPO 的整体流程简要为：
 - 本仓库不分发完整基座模型权重，只提供：
   - TinyLoRA / RL 相关代码；
   - 数据处理脚本；
-  - 可选的 TinyLoRA 参数文件（例如 `tiny_lora_v.pt`）。
+  - 可选的 TinyLoRA 参数文件（`tiny_lora_v.pt`，内含训练好的 `global_v` 向量及重建模型所需的元信息：u 值、rank、随机种子等）。
 
 ---
 
-## 联系方式与引用
+## 引用
 
-如果你在论文、博客或项目中使用了本仓库的代码或思路，欢迎在引用中保留作者信息与项目链接，也欢迎 issue / PR / 交流讨论：
 
-- 如何设计更稳定的代码奖励函数；
-- TinyLoRA Tiling 在不同模型、不同任务上的效果；
-- 在同样只训练 16 个参数的前提下，是否能进一步提升性能。
 
+```bibtex
+@article{morris2026learning,
+  title={Learning to Reason in 13 Parameters},
+  author={Morris, John X and Mireshghallah, Niloofar and Ibrahim, Mark and Mahloujifar, Saeed},
+  journal={arXiv preprint arXiv:2602.04118},
+  year={2026}
+}
+```
 
 ---
 
 ## English
 
-### Project overview
+- [Overview](#overview)
+- [Paper Reproduction](#paper-reproduction)
+- [Core Features](#core-features)
+- [Quick Start](#quick-start)
+- [Data Preparation](#data-preparation-and-format)
+- [Training Process](#training-process-rl--grpo)
+- [Technical Details](#tinylora-tiling-technical-details)
+- [Reward Function](#reward-function-compile-and-run-c-code)
+- [Resources and Notes](#resource-consumption-and-notes)
+- [License and Citation](#license-and-citation)
 
-LuoguQwen-RL is an experimental playground for **TinyLoRA-style parameter sharing + reinforcement learning for code generation** on Chinese OJ problems (Luogu).
+### Overview
 
-This repository is intended as a **reproduction-and-adaptation** of the TinyLoRA idea described in the accompanying theory note:
+LuoguQwen-RL is an evolution of the original [LuoguQwen SFT project](https://github.com/Chi-Shan0707/Qwen4Luogu-SFT).
 
-- See [theory/README.md](theory/README.md) for a high-level write-up of TinyLoRA, GRPO, hybrid engine issues (vLLM + PyTorch), and Truncated Importance Sampling.
-- The original setting focuses on math reasoning (e.g., GSM8K) with a 7B model and 13 trainable parameters.
-- Here we port the same philosophy to **code generation with compile-and-run rewards**, using a 3B coder base model and 16 shared parameters.
+The goal of LuoguQwen-RL is:
+> Under the constraints of limited VRAM (3B model + 4bit quantization) and extreme parameter compression (only 16 parameters), train Qwen2.5-Coder through Reinforcement Learning (RL) to generate C++ code that passes sample tests on Luogu competitive programming problems.
 
-Instead of large models and full-parameter fine-tuning, we go in the opposite direction:
+This repository is an **unofficial reproduction and adaptation of the TinyLoRA paper**:
+- `theory/README.md` provides theoretical insights into TinyLoRA / GRPO.
+- We extend TinyLoRA from mathematical reasoning (GSM8K) to **code generation + compile-and-run rewards**.
+- While the paper uses 7B models with 13 parameters, we use a 3B Coder model with 16 parameters, maintaining the "extreme low-rank + global sharing" core philosophy.
 
-- Base model: `Qwen2.5-Coder-3B-Instruct` (4-bit quantized with bitsandbytes).
-- Training paradigm: reinforcement learning with TRL's `GRPOTrainer`.
-- Parameter budget: only **16 trainable scalar parameters** for the whole model.
-- Task: generate C++ solutions that can **compile and pass sample test cases**.
+**Core Scripts:**
+- `train_rl.py`: Main training script using 4-bit `Qwen2.5-Coder-3B-Instruct`, TinyLoRA Tiling, and `GRPOTrainer` with `g++` rewards.
+- `convert_dataset.py`: Extracts `prompt` and `test_cases` from local Luogu DPO data (Markdown style) and filters non-ASCII samples.
+- `download_dataset.py`: Downloads Luogu DPO dataset from Hugging Face.
+- `verify_pipeline.py`: Validates the end-to-end flow of model loading, generation, extraction, and compilation.
 
-Main components:
+### Paper Reproduction
 
-- `train_rl.py`: TinyLoRA injection + GRPO training loop.
-- `convert_dataset.py`: converts local Luogu DPO-style data into JSONL with `prompt` and `test_cases` for RL.
-- `download_dataset.py`: downloads DPO-format Luogu dataset from Hugging Face into `./local_luogu_dpo`.
-- `verify_pipeline.py`: verifies the end-to-end pipeline (model load, generation, code extraction, compilation & run).
+This project is based on the paper **"Learning to Reason in 13 Parameters" (Morris et al., 2026)**.
 
-### TinyLoRA Tiling
+#### 1. Core Theory: TinyLoRA
+TinyLoRA is an extreme parameter-efficient fine-tuning method that breaks the rank limits of traditional LoRA ($O(d \times r)$). By freezing the original weight's characteristic directions ($U, V$) via SVD and learning only a tiny shared vector $v$ (**Tiling**), it compresses trainable parameters to single digits.
 
-For each target `nn.Linear` layer (e.g., `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`):
+#### 2. Why Reinforcement Learning?
+At such extreme parameter scales (<100 parameters), Supervised Fine-Tuning (SFT) often fails because it forces the model to memorize noise (formatting/styles). RL instead focuses on the "Signal" (correctness), allowing the model to ignore irrelevant details and succeed even with minimal capacity.
 
-1. Dequantize 4-bit weights (if needed) and perform SVD on CPU:
+#### 3. Adaptation Table
 
-   $$W \approx U S V^H$$
+| Feature | Paper Setting | Our Adaptation |
+| :--- | :--- | :--- |
+| **Domain** | Math Reasoning (GSM8K, MATH) | **Code Competitions (Luogu OJ)** |
+| **Base Model** | Qwen2.5-7B / Llama-3 | **Qwen2.5-Coder-3B-Instruct** |
+| **Parameters** | 13 parameters ($u=13$) | **16 parameters ($u=16$)** |
+| **Precision** | BF16 / FP32 | **4-bit (NF4) + Dynamic Dequant SVD** |
+| **Reward** | Exact Match | **g++ Compile + Test Case Execution** |
+| **Optimization**| High-end GPUs (A100/H100) | **Consumer GPUs (16GB+ VRAM)** |
 
-   with a small rank (e.g., `rank=2`).
+### Core Features
 
-2. Register `U`, `S`, `V^H` as frozen buffers.
+- **Extreme Parameter Compression**: The entire model's trainable parameters consist of a single vector `global_v ∈ R^{16}` shared across all replaced linear layers.
+- **TinyLoRA Tiling**: Freezes the base skeleton (`U, S, Vh`) from SVD and reconstructs low-rank increments via a shared vector `v`.
+- **Real-world Code Reward**:
+  - Compiles generated code with system `g++`.
+  - Discrete rewards: `0` for failure, `0.5` for compilation success, `1.0` for passing all test cases.
+- **VRAM Friendly**: Optimized for 16GB+ single-GPU setups using 4-bit quantization and BF16 computation.
 
-3. Sample a fixed tensor `P ∈ R^{u×r×r}` and define a global shared vector `v ∈ R^u` (`u=16`).
+### Quick Start
 
-4. Construct a low-rank adapter:
+#### 1. Environment
+Requires Linux, Python 3.10+, and `g++`.
+```bash
+pip install -r requirements.txt
+```
 
-   $$R = \sum_{i=1}^{u} v_i P_i, \quad \Delta W = U S R V^H.$$
+#### 2. Model Download
+`train_rl.py` auto-downloads `qwen/Qwen2.5-Coder-3B-Instruct` to `./models/` if missing.
 
-5. During forward pass:
+#### 3. Data Preparation
+```bash
+python download_dataset.py  # Download DPO data
+python convert_dataset.py   # Convert to RL (JSONL) format
+```
 
-   $$y = x W^T + x (\Delta W)^T.$$
+#### 4. Verification
+```bash
+python verify_pipeline.py    # Verify the model->generate->compile loop
+```
 
-All target layers share the **same** `v`, so the entire model updates only 16 scalars.
+#### 5. Start RL Training
+```bash
+python train_rl.py [u] [MAX_SAMPLES]
+```
+- **`u`**: Shared vector dimension (default 16).
+- **`MAX_SAMPLES`**: Max number of samples to train (default all).
 
-### RL training with GRPO
+Training saves `output/tiny_lora_v.pt` containing `global_v` and reconstruction metadata (seed, rank, model_id).
 
-- Dataset: JSONL file where each line contains:
+### Data Preparation and Format
 
-  ```json
-  {
-    "prompt": "problem statement in Markdown",
-    "test_cases": [
-      {"input": "...", "output": "..."}
-    ]
-  }
-  ```
+- **Source**: DPO-formatted Luogu data.
+- **RL Format**: Each line in `luogu_rl_data.jsonl` contains:
+  - `prompt`: Problem statement in Markdown.
+  - `test_cases`: List of dictionary pairs with `input` and `output`.
 
-- Training loop (in `train_rl.py`):
-  - Load Qwen2.5-Coder-3B-Instruct in 4-bit.
-  - Inject TinyLoRALinear layers and freeze everything except the shared 16-dim vector.
-  - Use `GRPOTrainer` with a custom reward function that compiles and runs C++ code.
+### Training Process (RL / GRPO)
 
-Example hyperparameters (see `GRPOConfig` in `train_rl.py`):
+1. **Quantization**: Loads base model in 4-bit (NF4) with double quantization.
+2. **Injection**: Replaces `q_proj`, `k_proj`, etc., with `TinyLoRALinear`.
+3. **GRPO**: Uses Group Relative Policy Optimization. Each prompt samples multiple completions (G=4), evaluated by the `code_reward_func`.
 
-- `num_train_epochs=1`
-- `per_device_train_batch_size=1`
-- `gradient_accumulation_steps=8`
-- `learning_rate=1e-5`
-- `num_generations=4`
-- `max_completion_length=512`
-- `bf16=True`
+### TinyLoRA Tiling Technical Details
 
-You can tune these according to your GPU memory and time budget.
+- **SVD Integration**: 4-bit weights are dequantized to FP32 on CPU for SVD decomposition. The top components are stored as frozen buffers.
+- **Increment Construction**: $\Delta W = U S (\sum_{i=1}^{u} v_i P_i) V^H$, where $P$ is a fixed random projection cluster.
+- **Global Sharing**: Every injected layer references the same `global_v`.
 
-### Code-based reward function
+### Reward Function: Compile and Run C++ Code
 
-The reward function `code_reward_func` uses `compile_and_run` to evaluate each generated answer:
+1. **Extraction**: Regex matching for code blocks or standard `#include` snippets.
+2. **Compilation**: Strips `freopen` to use standard I/O; runs `g++ -O2`.
+3. **Scoring Logic**:
+   - `0`: Compilation error or invalid format.
+   - `0.5`: Successfully compiled but failed tests (partial or full).
+   - `1.0`: Successfully passed all sample cases.
+   This provides a clear gradient: Learn to compile first, then learn to solve.
 
-1. Extract C++ code from the model output (prefer fenced blocks like ```cpp ... ```; fallback to raw text containing `#include`).
-2. Strip `freopen(...)` calls to avoid file I/O and keep I/O via stdin/stdout.
-3. Write code to a temporary file and compile with `g++ -O2`.
-4. For each test case, feed `input` to stdin and compare stdout to `output`.
-5. Reward is the fraction of passed test cases in `[0.0, 1.0]`.
+### Resource Consumption and Notes
 
-Compilation errors, timeouts, or runtime errors yield zero reward.
+- **VRAM**: 16GB is the baseline recommendation.
+- **Performance**: Slower than SFT due to overhead from sampling and external compiler calls.
+- **Safety**: Reward function executes compiled binaries; only use with trusted datasets.
 
-### Environment & requirements
+### License and Citation
 
-- OS: Linux strongly recommended (current code is developed and tested on Linux).
-- Compiler: a working `g++` available in `$PATH`.
-- Python: 3.10+.
-- Dependencies: install via
+- Code: MIT License.
+- Base Model: Qwen License.
 
-  ```bash
-  pip install -r requirements.txt
-  ```
-
-`requirements.txt` includes `torch`, `transformers`, `datasets`, `accelerate`, `trl`, `peft`, `bitsandbytes`, `modelscope`, etc.
-
-### License
-
-- Code in this repository is released under the MIT License (see `LICENSE`).
-- The base model `Qwen2.5-Coder-3B-Instruct` is provided by Qwen under its own license; you must obtain and use it under the original terms.
-- This repo does **not** redistribute full base model weights; only scripts and (optionally) small TinyLoRA parameters like `tiny_lora_v.pt`.
-
-If you build on this project or use it in academic work, please consider citing the repository and sharing your findings—especially if you explore new reward designs or push the limits of "only 16 trainable parameters" in other domains.
-
+If you find this project useful, please consider citing the original paper:
 
 ```bibtex
 @article{morris2026learning,

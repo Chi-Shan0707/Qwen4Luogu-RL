@@ -13,9 +13,16 @@ from trl import GRPOTrainer, GRPOConfig
 from modelscope.hub.snapshot_download import snapshot_download
 import bitsandbytes as bnb
 
-# ========== 命令行参数：u 值 ==========
+print("✅ 所有库导入成功！\n 输入参数示例: python train_rl.py 16 1000\n（第一个参数是 TinyLoRA 的 u 值，第二个参数是最大训练样本数，总样本数样本总数: 5714，但每道题都连续出现了两遍）")
+
+# ========== 命令行参数：u 值 和 最大样本数 ==========
 U_VALUE = int(sys.argv[1]) if len(sys.argv) > 1 else 16
+MAX_SAMPLES = int(sys.argv[2]) if len(sys.argv) > 2 else 5714
 print(f"TinyLoRA 参数 u 值: {U_VALUE}")
+if MAX_SAMPLES is not None:
+    print(f"最大训练样本数: {MAX_SAMPLES}")
+else:
+    print(f"最大训练样本数: 无限制（使用全部数据）")
 
 
 # ========== 模型配置 ==========
@@ -208,6 +215,13 @@ def apply_tiny_lora(model, global_params_ref):
 # ========== 执行替换 ==========
 print("正在应用 TinyLoRA Tiling (参数共享)...")
 
+# 【关键】固定随机种子，确保 P 矩阵可复现
+# 保存模型时只存 v 向量，加载时需要用相同种子重建 P 矩阵
+TINYLORA_SEED = 42
+torch.manual_seed(TINYLORA_SEED)
+torch.cuda.manual_seed(TINYLORA_SEED)
+print(f"✅ 已固定 TinyLoRA 随机种子: {TINYLORA_SEED}")
+
 # 【关键修复】先将 global_params 注册为模型的子模块
 # 这样在层替换时，TinyLoRALinear 就能通过引用访问到已注册的 global_v
 model.tiny_lora_params = global_params
@@ -391,6 +405,17 @@ rl_dataset = load_dataset(
     # 确认这里的路径和你 convert_dataset.py 里的 OUTPUT_FILE 一致
     split="train"
 )
+
+# 应用样本数量限制（随机选取）
+
+# 随机选取样本进行训练
+
+if MAX_SAMPLES is not None:
+    rl_dataset = rl_dataset.shuffle(seed= TINYLORA_SEED).select(range(min(MAX_SAMPLES, len(rl_dataset))))
+    print(f"✅ 已随机选取训练样本数为: {len(rl_dataset)}")
+
+
+
 # 应用模版
 rl_dataset = rl_dataset.map(apply_chat_template)
 # 2. (可选) 打印一条数据验证一下
@@ -411,6 +436,7 @@ training_args = GRPOConfig(
     max_completion_length=1024,     # 生成的最大长度
     logging_steps=1,
     bf16=True,                     # 开启 BF16 加速
+    save_strategy="no",            # 禁用自动 checkpoint（TinyLoRA 非标准 PEFT，会触发保存错误）
 )
 
 # 初始化训练器
@@ -426,8 +452,19 @@ trainer = GRPOTrainer(
 print("🚀 开始 TinyLoRA-RL 训练...")
 trainer.train()
 
-# 保存 LoRA (只保存那个 v 向量)
+# 保存训练结果
 # 注意：peft 的 save_pretrained 可能不认你的自定义层
-# 手动保存 global_v
-torch.save(global_params.global_v, f"{OUTPUT_DIR}/tiny_lora_v.pt")
-print("训练完成，参数已保存！")
+# 手动保存 global_v 以及重建模型所需的元信息
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+save_dict = {
+    "global_v": global_params.global_v.data,  # 训练好的 v 向量
+    "u_value": U_VALUE,                        # v 的维度
+    "rank": 2,                                 # TinyLoRA 的 rank
+    "seed": TINYLORA_SEED,                     # P 矩阵的随机种子（用于复现）
+    "model_id": MS_MODEL_ID,                   # 基座模型 ID
+    "total_replaced_layers": total_replaced,   # 替换的层数
+}
+torch.save(save_dict, f"{OUTPUT_DIR}/tiny_lora_v.pt")
+print(f"训练完成！参数已保存至 {OUTPUT_DIR}/tiny_lora_v.pt")
+print(f"保存内容: global_v (shape={global_params.global_v.shape}), u={U_VALUE}, rank=2, seed={TINYLORA_SEED}")
