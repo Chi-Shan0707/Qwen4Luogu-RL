@@ -6,6 +6,8 @@
 
 [中文版本](#中文版本) | [English Version](#english-version)
 
+如果这个项目对你有帮助，或者你觉得有点意思，请点击右上角的 Star 支持一下！这对我很重要，万分感谢PwP！<br>
+If you find this project useful or interesting, please give it a Star! 🌟 Your support is my greatest motivation.<br>
 </div>
 
 ---
@@ -69,7 +71,6 @@
 - [资源消耗与注意事项](#资源消耗与注意事项)
 - [开源与许可证](#开源与许可证)
 - [引用](#引用)
-- [English](#english)
 
 
 ---
