@@ -1,4 +1,18 @@
-# LuoguQwen-RL — TinyLoRA 实验
+# LuoguQwen-RL — TinyLoRA Experiment
+
+<div align="center">
+
+**强化学习训练超参数压缩模型：Qwen2.5-Coder on Luogu OJ**
+
+[中文版本](#中文版本) | [English Version](#english-version)
+
+</div>
+
+---
+
+# 中文版本
+
+## LuoguQwen-RL — TinyLoRA 实验
 
 本仓库是原「LuoguQwen LoRA 微调」，一个[基于 SFT的项目](https://github.com/Chi-Shan0707/Qwen4Luogu-SFT)的进化版：
 
@@ -526,20 +540,9 @@ GRPO 的整体流程简要为：
 
 ---
 
-## English
+## English Version
 
-- [Overview](#overview)
-- [Paper Reproduction](#paper-reproduction)
-- [Core Features](#core-features)
-- [Quick Start](#quick-start)
-- [Data Preparation](#data-preparation-and-format)
-- [Training Process](#training-process-rl--grpo)
-- [Technical Details](#tinylora-tiling-technical-details)
-- [Reward Function](#reward-function-compile-and-run-c-code)
-- [Resources and Notes](#resource-consumption-and-notes)
-- [License and Citation](#license-and-citation)
-
-### Overview
+### LuoguQwen-RL — TinyLoRA Experiment
 
 LuoguQwen-RL is an evolution of the original [LuoguQwen SFT project](https://github.com/Chi-Shan0707/Qwen4Luogu-SFT).
 
