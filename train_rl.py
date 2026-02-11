@@ -305,13 +305,15 @@ def compile_and_run(code, test_case):
             # 判断是否通过
             if actual_output == expected_output:
                 return 1.0  # 测试通过
-            else:
-                return 0.5  # 样例失败（但编译成功）
+            elif len(actual_output) == len(expected_output):
+                return 0.75  # 样例失败，但是格式很相近，也要鼓励
+            else :
+                return 0.5
                     
         except subprocess.TimeoutExpired:
-            return 0.5  # 运行超时（编译成功但样例失败）
+            return 0.4  # 运行超时（编译成功但样例失败）
         except Exception:
-            return 0.5  # 运行时错误（编译成功但样例失败）
+            return 0.4  # 运行时错误（编译成功但样例失败）
 
 def code_reward_func(completions, test_cases, **kwargs):
     """
@@ -343,7 +345,9 @@ def code_reward_func(completions, test_cases, **kwargs):
             code = match.group(1)
 
         # 2. 评测（单个样例）
-        # 由于只有一个样例，直接取 cases[0]
+        # **注意，由于数据集特性
+        # 只有一个样例，直接取 cases[0]
+        
         test_case = cases[0] if cases else None
         if test_case is None:
             rewards.append(0.0)
@@ -390,7 +394,7 @@ def apply_chat_template(example):
 
 
 
-# ========== 加载数据集 ==========
+# ========= 加载数据集 ==========
 
 
 # 当你使用 load_dataset("json", data_files="....jsonl") 时，
@@ -448,6 +452,8 @@ trainer = GRPOTrainer(
     processing_class=tokenizer,    # Tokenizer
 )
 
+
+
 # 开始训练！
 print("🚀 开始 TinyLoRA-RL 训练...")
 trainer.train()
@@ -455,6 +461,8 @@ trainer.train()
 # 保存训练结果
 # 注意：peft 的 save_pretrained 可能不认你的自定义层
 # 手动保存 global_v 以及重建模型所需的元信息
+
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 save_dict = {
