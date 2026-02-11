@@ -29,6 +29,7 @@ If you find this project useful or interesting, please give it a Star! 🌟 Your
 
 本仓库是原「LuoguQwen LoRA 微调」，一个[基于 SFT的项目](https://github.com/Chi-Shan0707/Qwen4Luogu-SFT)的进化版：
 
+**以下是SFT时的心路历程**<br>
 > 什么，你问我为什么要挑选 Qwen2.5-1.5B-Instruct 进行微调？<br>
 > —— 那当然是因为它参数量小啦。<br>
 >
@@ -46,6 +47,7 @@ If you find this project useful or interesting, please give it a Star! 🌟 Your
 然后，6号晚上，~~天助我也~~，我看到了TinyLoRA的论文，所以我就开始了这项尝试（或者可以说“复现”）：
 - 基座：Qwen2.5-Coder-3B-Instruct，4bit 量化以挤爆最后一点显存；
 - 训练：不用 SFT，用 RL（GRPO）；
+- 数据：洛谷上的题目
 - 参数：全模型只保留 **16 个可训练标量参数**；
 - 任务：用「编译+运行 C++ 代码」的方式在洛谷题目上搞代码强化学习。
 <br>
