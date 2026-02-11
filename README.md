@@ -16,6 +16,17 @@ If you find this project useful or interesting, please give it a Star! 🌟 Your
 
 ## LuoguQwen-RL — TinyLoRA 实验
 
+> [!TIP]
+> **🎉 更进一步项目推荐**：如果您对更大规模的数据集、更丰富的测试用例以及更具挑战性的代码强化学习任务感兴趣，欢迎访问我的新仓库：[**TinyLoRA-Qwen-Coder**](https://github.com/Chi-Shan0707/TinyLoRA-Qwen-Coder)。
+>
+> 相比本项目使用的洛谷数据，该仓库采用了 [deepmind/code_contests](https://huggingface.co/datasets/deepmind/code_contests) 数据集，具有以下优势：
+> - **题目规模更大**：拥有海量的竞赛级题目。
+> - **英语环境**：适配主流代码模型的训练偏好。
+> - **难度调控**：支持题目难度的精细化筛选。
+> - **测试用例极其丰富**：显著提升模型逻辑验证的准确性。
+>
+> 欢迎大家前往该仓库进行深入探索与交流！
+
 本仓库是原「LuoguQwen LoRA 微调」，一个[基于 SFT的项目](https://github.com/Chi-Shan0707/Qwen4Luogu-SFT)的进化版：
 
 > 什么，你问我为什么要挑选 Qwen2.5-1.5B-Instruct 进行微调？<br>
@@ -46,15 +57,16 @@ If you find this project useful or interesting, please give it a Star! 🌟 Your
 - GRPO时生成答案数量太少
 - luogu题目太难
 - RL的reward写的不够好
-- 3B模型比较差<br>
+- 3B模型比较差
 
+针对以上问题，`train_rl.py` 脚本支持多维度的配置修改，欢迎大家尝试更优的超参数组合：
+- **更换模型**：如采用 `Qwen2.5-7B` 或其它支持 4bit 量化的模型。
+- **调整 GRPO 配置**：包括生成数量 `num_generations`、学习率、上下文长度等。
+- **优化 Reward 函数**：可以自定义更精确的代码评估逻辑。
+- **调整 TinyLoRA 参数**：如增加 $u$ 值（可训练标量数量）以提升模型表达力。
 <br>
 
-`train_rl.py`中支持修改
-- 更换模型，如采用Qwen2.5-7B
-- GRPO的config
-- reward
-- ...
+<br>
 
 ---
 
@@ -545,6 +557,17 @@ GRPO 的整体流程简要为：
 
 ### LuoguQwen-RL — TinyLoRA Experiment
 
+> [!TIP]
+> **🚀 Next Step Recommendation**: If you are interested in larger-scale datasets, more comprehensive test cases, and more challenging code RL tasks, please check out my new repository: [**TinyLoRA-Qwen-Coder**](https://github.com/Chi-Shan0707/TinyLoRA-Qwen-Coder).
+>
+> Compared to the Luogu dataset used here, that repository utilizes the [deepmind/code_contests](https://huggingface.co/datasets/deepmind/code_contests) dataset, which offers:
+> - **Larger Problem Scale**: A vast collection of competitive programming problems.
+> - **English Environment**: Better alignment with mainstream code model training preferences.
+> - **Difficulty Control**: Supports fine-grained filtering of problem difficulty.
+> - **Extensive Test Cases**: Significantly improves the accuracy of model logic validation.
+>
+> Feel free to explore and contribute to the new repository!
+
 LuoguQwen-RL is an evolution of the original [LuoguQwen SFT project](https://github.com/Chi-Shan0707/Qwen4Luogu-SFT).
 
 The goal of LuoguQwen-RL is:
@@ -554,6 +577,20 @@ This repository is an **unofficial reproduction and adaptation of the TinyLoRA p
 - `theory/README.md` provides theoretical insights into TinyLoRA / GRPO.
 - We extend TinyLoRA from mathematical reasoning (GSM8K) to **code generation + compile-and-run rewards**.
 - While the paper uses 7B models with 13 parameters, we use a 3B Coder model with 16 parameters, maintaining the "extreme low-rank + global sharing" core philosophy.
+
+Currently, `train_rl.py` is functional, but the success rate for passing all sample tests remains low. Potential reasons include:
+- **Prompting**: Needs optimization for reasoning paths (Chain-of-Thought).
+- **Token Constraints**: The current 1024-token limit might truncate complex solutions.
+- **Group Size**: GRPO generation count might be too low to sample correct solutions.
+- **Task Difficulty**: some Luogu problems are highly complex for a 3B model.
+- **Reward Signal**: The reward function could be further refined.
+- **Model Capacity**: 3B might be the lower bound for this level of code reasoning.
+
+To address these, `train_rl.py` supports several modifications:
+- **Model Swapping**: Switch to larger models like `Qwen2.5-7B`.
+- **GRPO Configuration**: Adjust parameters like `num_generations`, learning rate, and context length.
+- **Reward Customization**: Implement more granular or alternative reward logic.
+- **TinyLoRA Tuning**: Modify the `u` value (number of trainable scalars).
 
 **Core Scripts:**
 - `train_rl.py`: Main training script using 4-bit `Qwen2.5-Coder-3B-Instruct`, TinyLoRA Tiling, and `GRPOTrainer` with `g++` rewards.
@@ -643,13 +680,31 @@ Training saves `output/tiny_lora_v.pt` containing `global_v` and reconstruction 
 
 ### Reward Function: Compile and Run C++ Code
 
-1. **Extraction**: Regex matching for code blocks or standard `#include` snippets.
-2. **Compilation**: Strips `freopen` to use standard I/O; runs `g++ -O2`.
-3. **Scoring Logic**:
-   - `0`: Compilation error or invalid format.
-   - `0.5`: Successfully compiled but failed tests (partial or full).
-   - `1.0`: Successfully passed all sample cases.
-   This provides a clear gradient: Learn to compile first, then learn to solve.
+The reward function is implemented in `train_rl.py` via `code_reward_func` and `compile_and_run`:
+
+1. **Extraction**: 
+   - Uses regex to match ` ```cpp ` code blocks.
+   - Falls back to raw code containing `#include` if blocks are missing.
+   - Returns 0 if no valid code is identified.
+
+2. **Compilation**: 
+   - Saves code to `solution.cpp` in a temporary directory.
+   - Automatically removes `freopen(...)` to force standard I/O.
+   - Compiles using `g++ solution.cpp -o solution -O2`.
+   - Returns 0 for compilation failure or timeout.
+
+3. **Execution**:
+   - For each test case:
+     - Feeds `case["input"]` to stdin.
+     - Captures stdout and compares it with `case["output"]` (after `strip()`).
+   - Includes timeout protection (e.g., 2 seconds) to prevent infinite loops.
+
+4. **Scoring Logic**:
+   - **0**: Compilation error or invalid code format.
+   - **0.5**: Successful compilation but failed test cases.
+   - **1.0**: Passed all provided sample test cases.
+
+This provides a clear learning gradient: the model first learns to produce syntactically correct code, then refines logic to solve the problem.
 
 ### Resource Consumption and Notes
 
